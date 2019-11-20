@@ -8,7 +8,8 @@
 
 (defparameter *jmdict-tables*
   '(("Entry"
-     ("id" "INTEGER PRIMARY KEY"))
+     ("id" "INTEGER PRIMARY KEY")
+     ("sequence_number" "INTEGER NOT NULL UNIQUE"))
     ("Kanji"
      ("id" "INTEGER PRIMARY KEY")
      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)")
@@ -58,15 +59,36 @@
       :comment "The type (e.g. literal, figurative) of the gloss")))
   "A list of the tables to create for the JMDict database.")
 
-(defun convert-jmdict-to-sqlite (xml-path sqlite-path)
-  "Convert the JMDict XML file at XML-PATH to a SQLite database at SQLITE-PATH."
+(defparameter *jmdict-structure*
+  '(("Entry" (:|ent_seq| :text))
+    (:|k_ele|
+     ("Kanji" :parent-id (:|keb| :text)))
+    (:|r_ele|
+     ("Reading" :parent-id (:|reb| :text))
+     (:|re_restr|
+      ("ReadingRestriction" :parent-id (:text))))
+    (:|sense|
+     ("Sense" :parent-id)
+     (:|xref|
+      ("SenseCrossReference" :parent-id (:text)))
+     (:|ant|
+      ("SenseAntonym" :parent-id (:text)))
+     (:|pos|
+      ("SensePartOfSpeech" :parent-id (:text)))
+     (:|gloss|
+      ("Gloss" :parent-id (:text) (:or (xml:|lang|) "eng")
+               (:|g_gend|) (:|g_type|))))))
+
+(defun convert-jmdict-to-sqlite (jmdict-path sqlite-path)
+  "Convert the JMDict XML file at JMDICT-PATH to a SQLite database at SQLITE-PATH."
   (sqlite:with-open-database (db sqlite-path)
-    (create-tables db *jmdict-tables*)))
+    (create-tables db *jmdict-tables*)
+    (insert-jmdict db jmdict-path)))
 
 ;;; SQLite interaction
 
 (defun create-tables (db tables)
-  "Create the tables specified by TABLES in DB.
+  "Create the tables specified by TABLES in DB, dropping them if they already exist.
 TABLES is an alist of table names to columns in the table. Each column
 is a list of the form (NAME TYPE &key COMMENT)."
   (labels ((format-column-string (stream column &optional last)
@@ -85,21 +107,57 @@ is a list of the form (NAME TYPE &key COMMENT)."
              (let ((create-statement
                     (with-output-to-string (statement)
                       (format-table-string statement table))))
-               (sqlite:execute-non-query db create-statement))))
-    (loop for table in tables do (create-table table))))
+               (sqlite:execute-non-query db create-statement)))
+           (drop-table-if-exists (table)
+             (let ((drop-statement
+                    (format nil "DROP TABLE IF EXISTS ~a" (first table))))
+               (sqlite:execute-non-query db drop-statement))))
+    (loop for table in tables
+       do (drop-table-if-exists table)
+         (create-table table))))
 
 (defun insert-jmdict (db jmdict-path)
   "Insert the JMDict data from the file at JMDICT-PATH into DB."
-  (let ((entities (parse-xml-entities jmdict-path)))
-    (with-prepared-statements
-        ((insert-entry "INSERT INTO Entry VALUES (?)")
-         (insert-kanji "INSERT INTO Kanji VALUES (?, ?, ?)")
-         (insert-reading "INSERT INTO Reading VALUES (?, ?, ?)")) db
-      (flet ((process-entry (entry)
-               ))))))
+  (let ((entities (with-open-file (input jmdict-path)
+                    (parse-xml-entities input))))
+    (with-open-file (input jmdict-path)
+      (let ((id-counters (make-hash-table))
+            (n 0))
+        (parse-xml-entries input :|entry|
+                           (lambda (entry)
+                             (insert-value db entry *jmdict-structure*
+                                           id-counters)
+                             (when (zerop (rem (incf n) 100))
+                               (print n)))
+                           :entities entities)))))
+
+(defun insert-value (db value structure id-counters &key parent-id)
+  (destructuring-bind (table &rest columns) (first structure)
+    (let ((query (make-insert-query table (1+ (length columns))))
+          (column-values (mapcar (lambda (path)
+                                   (case path
+                                     (:parent-id parent-id)
+                                     (t (structure-path path value))))
+                                 columns))
+          (id (incf (gethash table id-counters 0))))
+      (apply #'sqlite:execute-non-query db query id column-values)
+      ;; Process sub-structures
+      (loop for (subelement . substructure) in (rest structure)
+         do (loop for child-value in (cdr (assoc subelement value))
+               ;; The table structure definition is recursive: we can
+               ;; continue in the same fashion for all child values
+               do (insert-value db child-value substructure id-counters
+                                :parent-id id))))))
+
+(defun make-insert-query (table n-columns)
+  "Create an insert query for TABLE with N-COLUMNS columns."
+  (with-output-to-string (query)
+    (format query "INSERT INTO ~a VALUES (" table)
+    (loop repeat (1- n-columns) do (format query "?, "))
+    (format query "?)")))
 
 (defmacro with-prepared-statements (statements db &body body)
-  "Executes BODY with functions created for the prepared statements in STATEMENTS.
+  "Execute BODY with functions created for the prepared statements in STATEMENTS.
 STATEMENTS is a list of lists of the form (FUNCTION STATEMENT), where
 FUNCTION is the name of a function to be defined in BODY that calls
 the prepared statement STATEMENT with the parameters passed to the
@@ -114,7 +172,8 @@ the prepared statement is only stepped once."
                             (loop for param in params
                                for i from 1
                                do (sqlite:bind-parameter ,sym i param))
-                            (sqlite:step-statement ,sym))
+                            (sqlite:step-statement ,sym)
+                            (sqlite:reset-statement ,sym))
                 functions))
      finally (return
                `(let ,bindings
@@ -124,6 +183,22 @@ the prepared statement is only stepped once."
                            collect `(sqlite:finalize-statement ,sym))))))))
 
 ;;; XML parsing
+
+(defun structure-path (path structure)
+  "Return the result of following PATH in STRUCTURE.
+PATH is a list of tag names: each tag will be followed in sequence and
+the first element matching the tag extracted. For example, the
+path (:k_ele :keb :TEXT) would return the first kanji reading of an
+element. If the path cannot be followed completely, return NIL.
+
+As a special case, if PATH is of the form (:OR PATH VALUE), then VALUE
+will be returned instead of the value at PATH if the same is NIL."
+  (if (eql :or (first path))
+      (or (structure-path (second path) structure) (third path))
+      (loop with result = structure
+         for tag in path
+         do (setf result (cadr (assoc tag result)))
+         finally (return result))))
 
 (defun parse-dom-elements (input element handler &key entities)
   "Parse a stream of XML from INPUT and call HANDLER with the DOM of every top-level ELEMENT.
@@ -163,35 +238,40 @@ ENTITIES is a hashtable giving the expansions of XML entities."
 The structure of an XML element is an alist where the keys are element
 names and the values are lists of the structures of all sub-elements
 with the corresponding name. Attribute values are treated the same way
-as sub-elements except the value is not a list, it is just the value
-of the attribute. All text in the element is treated as a special
-'TEXT' element.
+as sub-elements, treating the attribute name as the tag name. All text
+in the element is treated as a special 'TEXT' element.
 
 Note that this notion of 'structure' does not preserve the usual
-structure of XML, and is not general enough to process all documents;
-it is just good enough to process 'structured' data formats like
-JMDict and Kanjidic.
+structure of XML; it is just good enough to process 'structured' data
+formats like JMDict and Kanjidic.
 
 ENTITIES is a hashtable giving the expansions of XML entities."
-    (labels ((new-element-hook (name attributes seed)
+    (labels ((add-element (alist key value)
+               (let ((assoc (assoc key alist)))
+                 (if assoc
+                     (prog1 alist
+                       (setf (cdr assoc) (nconc (cdr assoc) (list value))))
+                     (cons (list key value) alist))))
+             (convert-attributes (attributes)
+               (mapcar (lambda (attr)
+                         (cons (car attr) (list (cdr attr))))
+                       attributes))
+             (new-element-hook (name attributes seed)
                (declare (ignore name attributes seed))
                ())
              (finish-element-hook (name attributes parent-seed seed)
-               (let ((structure (append attributes seed)))
-                 (when (eql name element)
-                   (funcall handler seed)
-                   (return-from finish-element-hook))
-                 (let ((assoc (assoc name parent-seed)))
-                   (if assoc
-                       (setf (cdr assoc) (nconc (cdr assoc) (list structure)))
-                       (push (list name seed) parent-seed))))
-               parent-seed)
+               (let ((structure (append (convert-attributes attributes)
+                                        seed)))
+                 (if (eql name element)
+                     ;; If we're at the target element, all we need to
+                     ;; do is call our handler
+                     (funcall handler structure)
+                     ;; Otherwise, we need to append this element's
+                     ;; structure to the parent's list of elements
+                     ;; with this name
+                     (add-element parent-seed name structure))))
              (text-hook (string seed)
-               (let ((assoc (assoc :text seed)))
-                 (if assoc
-                     (setf (cdr assoc) (nconc (cdr assoc) (list string)))
-                     (push (list :text string) seed)))
-               seed))
+               (add-element seed :text string)))
       (s-xml:start-parse-xml
        input
        (make-instance 's-xml:xml-parser-state
@@ -199,7 +279,8 @@ ENTITIES is a hashtable giving the expansions of XML entities."
                       :seed ()
                       :new-element-hook #'new-element-hook
                       :finish-element-hook #'finish-element-hook
-                      :text-hook #'text-hook))))
+                      :text-hook #'text-hook)))
+    nil)
 
 (defun parse-xml-entities (input)
   "Parse a stream of XML from INPUT and return a hashtable with all entities found in the DOCTYPE (as well as all standard XML entities)."
