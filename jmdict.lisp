@@ -192,32 +192,6 @@ enclosing XML element), if there is such a parent."
       (sqlite:step-statement statement)
       (sqlite:reset-statement statement))))
 
-(defmacro with-prepared-statements (statements db &body body)
-  "Execute BODY with functions created for the prepared statements in STATEMENTS.
-STATEMENTS is a list of lists of the form (FUNCTION STATEMENT), where
-FUNCTION is the name of a function to be defined in BODY that calls
-the prepared statement STATEMENT with the parameters passed to the
-function. This is really only useful for non-query statements, since
-the prepared statement is only stepped once."
-  (loop with syms and bindings and functions
-     for (function statement) in statements
-     do (let ((sym (gensym)))
-          (push sym syms)
-          (push `(,sym (sqlite:prepare-statement ,db ,statement)) bindings)
-          (push `(,function (&rest params)
-                            (loop for param in params
-                               for i from 1
-                               do (sqlite:bind-parameter ,sym i param))
-                            (sqlite:step-statement ,sym)
-                            (sqlite:reset-statement ,sym))
-                functions))
-     finally (return
-               `(let ,bindings
-                  (labels ,functions
-                    (unwind-protect (progn ,@body)
-                      ,@(loop for sym in syms
-                           collect `(sqlite:finalize-statement ,sym))))))))
-
 ;;; XML parsing
 
 (defun structure-path (path structure)
@@ -235,39 +209,6 @@ will be returned instead of the value at PATH if the same is NIL."
          for tag in path
          do (setf result (cadr (assoc tag result)))
          finally (return result))))
-
-(defun parse-dom-elements (input element handler &key entities)
-  "Parse a stream of XML from INPUT and call HANDLER with the DOM of every top-level ELEMENT.
-This is useful for parsing an XML file structured as a large number of
-repeating elements, which covers both cases we're interested in for
-this project (JMDict and Kanjidic). The DOM is passed in the
-XML-STRUCT format of s-xml.
-
-ENTITIES is a hashtable giving the expansions of XML entities."
-  ;; In the hooks below, the seed is a list of the elements
-  ;; encountered so far (in reverse order)
-  (labels ((new-element-hook (name attributes seed)
-             (declare (ignore name attributes seed)))
-           (finish-element-hook (name attributes parent-seed seed)
-             (let ((dom (s-xml:make-xml-element :name name
-                                                :attributes attributes
-                                                :children (nreverse seed))))
-               (if (equal name element)
-                   (progn (funcall handler dom)
-                          ;; Make sure we return nil no matter what
-                          ;; handler returns
-                          nil)
-                   (cons dom parent-seed))))
-           (text-hook (string seed)
-             (cons string seed)))
-    (s-xml:start-parse-xml
-     input
-     (make-instance 's-xml:xml-parser-state
-                    :entities (or entities (s-xml::make-standard-entities))
-                    :seed nil
-                    :new-element-hook #'new-element-hook
-                    :finish-element-hook #'finish-element-hook
-                    :text-hook #'text-hook))))
 
 (defun parse-xml-entries (input element handler &key entities)
     "Parse a stream of XML from INPUT and call HANDLER with the structure of every top-level ELEMENT.
