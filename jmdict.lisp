@@ -49,7 +49,12 @@
     ("Gloss"
      ("id" "INTEGER PRIMARY KEY")
      ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)")
-     ("gloss" "TEXT NOT NULL"
+     ;; Note: the JMDict entry for 畜生 actually has a gloss element
+     ;; with no contents (which, interestingly, is in Spanish). Rather
+     ;; than try to figure out a way to accommodate this in the code
+     ;; somehow, for now I've just removed the obvious NOT NULL
+     ;; constraint.
+     ("gloss" "TEXT"
       :comment "A target-language word or phrase translating the Japanese word")
      ("language" "TEXT NOT NULL"
       :comment "The three-letter language code of the gloss")
@@ -118,35 +123,54 @@ is a list of the form (NAME TYPE &key COMMENT)."
 
 (defun insert-jmdict (db jmdict-path)
   "Insert the JMDict data from the file at JMDICT-PATH into DB."
-  (let ((entities (with-open-file (input jmdict-path)
-                    (parse-xml-entities input))))
-    (with-open-file (input jmdict-path)
-      (let ((id-counters (make-hash-table))
-            (n 0))
-        (parse-xml-entries input :|entry|
-                           (lambda (entry)
-                             (insert-value db entry *jmdict-structure*
-                                           id-counters)
-                             (when (zerop (rem (incf n) 100))
-                               (print n)))
-                           :entities entities)))))
+  (sqlite:with-transaction db
+    (let ((entities (with-open-file (input jmdict-path)
+                      (parse-xml-entities input))))
+      (with-open-file (input jmdict-path)
+        (let ((id-counters (make-hash-table))
+              (prepared-statements (make-hash-table))
+              (n 0))
+          (parse-xml-entries input :|entry|
+                             (lambda (entry)
+                               (insert-value db entry *jmdict-structure*
+                                             id-counters prepared-statements)
+                               (when (zerop (rem (incf n) 10000))
+                                 (print n)))
+                             :entities entities))))))
 
-(defun insert-value (db value structure id-counters &key parent-id)
+(defun insert-value (db value structure id-counters
+                     prepared-statements &key parent-id)
+  "Insert VALUE into DB according to STRUCTURE.
+STRUCTURE is a list of table definitions like *JMDICT-STRUCTURE* that
+defines how to traverse VALUE and insert its components into the
+correct tables.
+
+ID-COUNTERS is a hash table maintaining a unique ID for each row
+inserted into each table. PREPARED-STATEMENTS is a hash table
+maintaining statements prepared for inserting rows into each table.
+
+PARENT-ID is the unique ID of the 'parent' element of this value (the
+enclosing XML element), if there is such a parent."
   (destructuring-bind (table &rest columns) (first structure)
-    (let ((query (make-insert-query table (1+ (length columns))))
+    (let ((statement
+           (gethash-lazy table prepared-statements
+                         (prepare-non-query-statement
+                          db
+                          (make-insert-query table (1+ (length columns))))))
           (column-values (mapcar (lambda (path)
                                    (case path
                                      (:parent-id parent-id)
                                      (t (structure-path path value))))
                                  columns))
           (id (incf (gethash table id-counters 0))))
-      (apply #'sqlite:execute-non-query db query id column-values)
+      (apply statement id column-values)
       ;; Process sub-structures
       (loop for (subelement . substructure) in (rest structure)
          do (loop for child-value in (cdr (assoc subelement value))
                ;; The table structure definition is recursive: we can
                ;; continue in the same fashion for all child values
-               do (insert-value db child-value substructure id-counters
+               do (insert-value db child-value substructure
+                                id-counters prepared-statements
                                 :parent-id id))))))
 
 (defun make-insert-query (table n-columns)
@@ -155,6 +179,16 @@ is a list of the form (NAME TYPE &key COMMENT)."
     (format query "INSERT INTO ~a VALUES (" table)
     (loop repeat (1- n-columns) do (format query "?, "))
     (format query "?)")))
+
+(defun prepare-non-query-statement (db sql)
+  "Prepare a non-query statement that can be called as a function binding its parameters to the function argument."
+  (let ((statement (sqlite:prepare-statement db sql)))
+    (lambda (&rest params)
+      (loop for param in params
+         for i from 1
+         do (sqlite:bind-parameter statement i param))
+      (sqlite:step-statement statement)
+      (sqlite:reset-statement statement))))
 
 (defmacro with-prepared-statements (statements db &body body)
   "Execute BODY with functions created for the prepared statements in STATEMENTS.
@@ -299,5 +333,18 @@ ENTITIES is a hashtable giving the expansions of XML entities."
           (setf (gethash entity entities) expansion))
      when (ppcre:scan end-scanner line)
      return entities))
+
+;;; Utility functions
+
+(defmacro gethash-lazy (key table default)
+  "Return the value of KEY in the hash table TABLE with a (lazily computed) default value DEFAULT."
+  (let ((value (gensym))
+        (present-p (gensym)))
+    `(multiple-value-bind (,value ,present-p) (gethash ,key ,table)
+       (if ,present-p
+           (values ,value t)
+           (let ((,value ,default))
+             (setf (gethash ,key ,table) ,value)
+             (values ,value t))))))
 
 ;;;; jmdict.lisp ends here
