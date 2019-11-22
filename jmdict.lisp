@@ -6,98 +6,93 @@
 
 ;;;; Code:
 
-(defparameter *jmdict-tables*
-  '(("Entry"
-     ("id" "INTEGER PRIMARY KEY")
-     ("sequence_number" "INTEGER NOT NULL UNIQUE"))
-    ("Kanji"
-     ("id" "INTEGER PRIMARY KEY")
-     ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)")
-     ("reading" "TEXT NOT NULL"
-      :comment "Reading in kanji or other non-kana characters"))
-    ("Reading"
-     ("id" "INTEGER PRIMARY KEY")
-     ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)")
-     ("reading" "TEXT NOT NULL"
-      :comment "Reading in kana"))
-    ("ReadingRestriction"
-     ("id" "INTEGER PRIMARY KEY")
-     ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)")
-     ("restriction" "TEXT NOT NULL"))
-    ("Sense"
-     ("id" "INTEGER PRIMARY KEY")
-     ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)"))
-    ("SenseCrossReference"
-     ("id" "INTEGER PRIMARY KEY")
-     ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)")
-     ("target" "TEXT NOT NULL"
-      :comment "A word in kanji or kana"))
-    ("SenseAntonym"
-     ("id" "INTEGER PRIMARY KEY")
-     ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)")
-     ("target" "TEXT NOT NULL"
-      :comment "A word in kanji or kana"))
-    ("SensePartOfSpeech"
-     ("id" "INTEGER PRIMARY KEY")
-     ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)")
-     ("part_of_speech" "TEXT NOT NULL"))
-    ("SenseField"
-     ("id" "INTEGER PRIMARY KEY")
-     ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)")
-     ("field" "TEXT NOT NULL"
-      :comment "The field of application of the entry/sense"))
-    ("Gloss"
-     ("id" "INTEGER PRIMARY KEY")
-     ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)")
-     ;; Note: the JMDict entry for 畜生 actually has a gloss element
-     ;; with no contents (which, interestingly, is in Spanish). Rather
-     ;; than try to figure out a way to accommodate this in the code
-     ;; somehow, for now I've just removed the obvious NOT NULL
-     ;; constraint.
-     ("gloss" "TEXT"
-      :comment "A target-language word or phrase translating the Japanese word")
-     ("language" "TEXT NOT NULL"
-      :comment "The three-letter language code of the gloss")
-     ("gender" "TEXT"
-      :comment "The gender of the gloss")
-     ("type" "TEXT"
-      :comment "The type (e.g. literal, figurative) of the gloss")))
-  "A list of the tables to create for the JMDict database.")
-
 (defparameter *jmdict-structure*
-  '(("Entry" (:|ent_seq| :text))
+  '(:|entry|
+    ("Entry"
+     ("sequence_number" "INTEGER NOT NULL UNIQUE" (:|ent_seq| :text)))
     (:|k_ele|
-     ("Kanji" :parent-id (:|keb| :text)))
+     ("Kanji"
+      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id)
+      ("reading" "TEXT NOT NULL" (:|keb| :text)
+                 :comment "Reading in kanji or other non-kana characters")))
     (:|r_ele|
-     ("Reading" :parent-id (:|reb| :text))
+     ("Reading"
+      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id)
+      ("reading" "TEXT NOT NULL" (:|reb| :text)
+                 :comment "Reading in kana"))
      (:|re_restr|
-      ("ReadingRestriction" :parent-id (:text))))
+      ("ReadingRestriction"
+       ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id)
+       ("restriction" "TEXT NOT NULL" (:text)))))
     (:|sense|
-     ("Sense" :parent-id)
+     ("Sense"
+      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id))
      (:|xref|
-      ("SenseCrossReference" :parent-id (:text)))
+      ("SenseCrossReference"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("target" "TEXT NOT NULL" (:text)
+                 :comment "A word in kanji or kana")))
      (:|ant|
-      ("SenseAntonym" :parent-id (:text)))
+      ("SenseAntonym"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("target" "TEXT NOT NULL" (:text)
+                 :comment "A word in kanji or kana")))
      (:|pos|
-      ("SensePartOfSpeech" :parent-id (:text)))
+      ("SensePartOfSpeech"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("part_of_speech" "TEXT NOT NULL" (:text))))
      (:|gloss|
-      ("Gloss" :parent-id (:text) (:or (xml:|lang|) "eng")
-               (:|g_gend|) (:|g_type|))))))
+      ("Gloss"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ;; Note: the JMDict entry for 畜生 actually has a gloss element
+       ;; with no contents (which, interestingly, is in Spanish).
+       ;; Rather than try to figure out a way to accommodate this in
+       ;; the code somehow, for now I've just removed the obvious NOT
+       ;; NULL constraint.
+       ("gloss" "TEXT" (:text))
+       ("language" "TEXT NOT NULL" (:or (xml:|lang|) "eng")
+                   :comment "The three-letter language code of the gloss")
+       ("gender" "TEXT" (:|g_gend|)
+                 :comment "The gender of the gloss")
+       ("type" "TEXT" (:|g_type|)
+               :comment "The type (e.g. literal, figurative) of the gloss")))))
+  "The structure of the JMDict database.
+The structure is represented as an alist of recursive 'trees' of
+elements, mimicking the schema of the original XML file. Each tree is
+a list, with the first element (the 'root') being a table description
+and the remaining elements being alists of structure trees
+corresponding to sub-elements in the XML file.
 
-(defun convert-jmdict-to-sqlite (jmdict-path sqlite-path)
-  "Convert the JMDict XML file at JMDICT-PATH to a SQLite database at SQLITE-PATH."
+Each table description is a list of the form (NAME &rest COLUMNS),
+where each column is itself a list of the form (NAME TYPE PATH &key
+:COMMENT). TYPE is a SQLite data type, including column constraints.
+PATH is a path (interpreted by STRUCTURE-PATH) to the data stored in
+the column. COMMENT is, optionally, a comment to include in the table
+schema (documentation).
+
+Following the table description, the rest of the structure is an alist
+of sub-structures, where the keys are sub-elements in the XML file.
+Each value in the alist is a structure of the same form as this one
+and will be processed in the same way for the corresponding
+sub-element.
+
+Note: only one top-level element is supported (or needed).")
+
+(defun convert-xml-to-sqlite (xml-path sqlite-path structure)
+  "Convert an XML file to a SQLite database following STRUCTURE.
+STRUCTURE is a database structure in the format of
+*JMDICT-STRUCTURE*."
   (sqlite:with-open-database (db sqlite-path)
-    (create-tables db *jmdict-tables*)
-    (insert-jmdict db jmdict-path)))
+    (create-tables db structure)
+    (insert-values db xml-path structure)))
 
 ;;; SQLite interaction
 
-(defun create-tables (db tables)
-  "Create the tables specified by TABLES in DB, dropping them if they already exist.
-TABLES is an alist of table names to columns in the table. Each column
-is a list of the form (NAME TYPE &key COMMENT)."
+(defun create-tables (db structure)
+  "Create the tables specified by STRUCTURE in DB, dropping them if they already exist."
   (labels ((format-column-string (stream column &optional last)
-             (destructuring-bind (name type &key comment) column
+             (destructuring-bind (name type path &key comment) column
+               (declare (ignore path))
                (format stream "~a ~a" name type)
                (unless last (format stream ","))
                (when comment (format stream " -- ~a" comment))
@@ -105,6 +100,9 @@ is a list of the form (NAME TYPE &key COMMENT)."
            (format-table-string (stream table)
              (destructuring-bind (name &rest columns) table
                (format stream "CREATE TABLE ~a (~%" name)
+               ;; Every table has a primary key column
+               (format-column-string stream '("id" "INTEGER PRIMARY KEY" nil)
+                                     (endp columns))
                (loop for rest on columns
                   do (format-column-string stream (car rest) (endp (cdr rest))))
                (format stream ");")))
@@ -117,22 +115,25 @@ is a list of the form (NAME TYPE &key COMMENT)."
              (let ((drop-statement
                     (format nil "DROP TABLE IF EXISTS ~a" (first table))))
                (sqlite:execute-non-query db drop-statement))))
-    (loop for table in tables
-       do (drop-table-if-exists table)
-         (create-table table))))
+    (destructuring-bind (element table &rest sub-structures) structure
+      (declare (ignore element))
+      (drop-table-if-exists table)
+      (create-table table)
+      (loop for sub-structure in sub-structures
+         do (create-tables db sub-structure)))))
 
-(defun insert-jmdict (db jmdict-path)
-  "Insert the JMDict data from the file at JMDICT-PATH into DB."
+(defun insert-values (db xml-path structure)
+  "Insert the data from XML-PATH into DB following STRUCTURE."
   (sqlite:with-transaction db
-    (let ((entities (with-open-file (input jmdict-path)
+    (let ((entities (with-open-file (input xml-path)
                       (parse-xml-entities input))))
-      (with-open-file (input jmdict-path)
+      (with-open-file (input xml-path)
         (let ((id-counters (make-hash-table))
               (prepared-statements (make-hash-table))
               (n 0))
-          (parse-xml-entries input :|entry|
+          (parse-xml-entries input (first structure)
                              (lambda (entry)
-                               (insert-value db entry *jmdict-structure*
+                               (insert-value db entry (rest structure)
                                              id-counters prepared-statements)
                                (when (zerop (rem (incf n) 10000))
                                  (print n)))
@@ -157,10 +158,11 @@ enclosing XML element), if there is such a parent."
                          (prepare-non-query-statement
                           db
                           (make-insert-query table (1+ (length columns))))))
-          (column-values (mapcar (lambda (path)
-                                   (case path
-                                     (:parent-id parent-id)
-                                     (t (structure-path path value))))
+          (column-values (mapcar (lambda (column)
+                                   (let ((path (third column)))
+                                     (case path
+                                       (:parent-id parent-id)
+                                       (t (structure-path path value)))))
                                  columns))
           (id (incf (gethash table id-counters 0))))
       (apply statement id column-values)
