@@ -96,6 +96,38 @@ sub-element.
 
 Note: only one top-level element is supported (or needed).")
 
+(defparameter *kanjidic-structure*
+  '(:|character|
+    ("Character"
+     ("literal" "TEXT NOT NULL" (:|literal| :text))
+     ("grade" "INTEGER" (:|misc| :|grade| :text))
+     ("stroke_count" "INTEGER" (:|misc| :|stroke_count| :text))
+     ("jlpt_level" "INTEGER" (:|misc| :|jlpt| :text)))
+    (:|reading_meaning|
+     ("ReadingMeaning"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id))
+     (:|rmgroup|
+      ("ReadingMeaningGroup"
+       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id))
+      (:|reading|
+        ("Reading"
+         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id)
+         ("reading" "TEXT NOT NULL" (:text))
+         ("type" "TEXT NOT NULL" (:|r_type|))
+         ("on_type" "TEXT" (:|on_type|))
+         ("approved" "TEXT" (:|r_status|))))
+      (:|meaning|
+        ("Meaning"
+         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id)
+         ("meaning" "TEXT NOT NULL" (:text))
+         ("language" "TEXT NOT NULL" (:or (:|m_lang|) "en")
+                     :comment "The two-letter language code of the meaning"))))
+     (:|nanori|
+      ("Nanori"
+       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id)
+       ("nanori" "TEXT NOT NULL" (:text))))))
+  "The structure of the Kanjidic XML file in the same format as *JMDICT-STRUCTURE*.")
+
 (defun convert-xml-to-sqlite (xml-path sqlite-path structure)
   "Convert an XML file to a SQLite database following STRUCTURE.
 STRUCTURE is a database structure in the format of
@@ -142,10 +174,15 @@ STRUCTURE is a database structure in the format of
 
 (defun insert-values (db xml-path structure)
   "Insert the data from XML-PATH into DB following STRUCTURE."
-  (sqlite:with-transaction db
-    (let ((entities (with-open-file (input xml-path)
-                      (parse-xml-entities input))))
-      (with-open-file (input xml-path)
+  (with-open-file (input xml-path)
+    ;; The process below relies on the fact that PARSE-XML-ENTITIES
+    ;; will advance the stream to the first line after the DOCTYPE,
+    ;; meaning that s-xml doesn't have to attempt to parse the
+    ;; DOCTYPE. This is unfortunately necessary, since s-xml chokes on
+    ;; the Kanjidic DOCTYPE (it gets confused with single quotes in
+    ;; comments, I think)
+    (let ((entities (parse-xml-entities input)))
+      (sqlite:with-transaction db
         (let ((id-counters (make-hash-table))
               (prepared-statements (make-hash-table))
               (n 0))
@@ -154,12 +191,13 @@ STRUCTURE is a database structure in the format of
                                (insert-value db entry (rest structure)
                                              id-counters prepared-statements)
                                (when (zerop (rem (incf n) 10000))
-                                 (print n)))
-                             :entities entities))))))
+                                 (format *error-output*
+                                         "Processed ~d entries" n)))
+                             :entities entities)))))
 
-(defun insert-value (db value structure id-counters
-                     prepared-statements &key parent-id)
-  "Insert VALUE into DB according to STRUCTURE.
+  (defun insert-value (db value structure id-counters
+                       prepared-statements &key parent-id)
+    "Insert VALUE into DB according to STRUCTURE.
 STRUCTURE is a list of table definitions like *JMDICT-STRUCTURE* that
 defines how to traverse VALUE and insert its components into the
 correct tables.
@@ -170,28 +208,28 @@ maintaining statements prepared for inserting rows into each table.
 
 PARENT-ID is the unique ID of the 'parent' element of this value (the
 enclosing XML element), if there is such a parent."
-  (destructuring-bind (table &rest columns) (first structure)
-    (let ((statement
-           (gethash-lazy table prepared-statements
-                         (prepare-non-query-statement
-                          db
-                          (make-insert-query table (1+ (length columns))))))
-          (column-values (mapcar (lambda (column)
-                                   (let ((path (third column)))
-                                     (case path
-                                       (:parent-id parent-id)
-                                       (t (structure-path path value)))))
-                                 columns))
-          (id (incf (gethash table id-counters 0))))
-      (apply statement id column-values)
-      ;; Process sub-structures
-      (loop for (subelement . substructure) in (rest structure)
-         do (loop for child-value in (cdr (assoc subelement value))
-               ;; The table structure definition is recursive: we can
-               ;; continue in the same fashion for all child values
-               do (insert-value db child-value substructure
-                                id-counters prepared-statements
-                                :parent-id id))))))
+    (destructuring-bind (table &rest columns) (first structure)
+      (let ((statement
+             (gethash-lazy table prepared-statements
+                           (prepare-non-query-statement
+                            db
+                            (make-insert-query table (1+ (length columns))))))
+            (column-values (mapcar (lambda (column)
+                                     (let ((path (third column)))
+                                       (case path
+                                         (:parent-id parent-id)
+                                         (t (structure-path path value)))))
+                                   columns))
+            (id (incf (gethash table id-counters 0))))
+        (apply statement id column-values)
+        ;; Process sub-structures
+        (loop for (subelement . substructure) in (rest structure)
+           do (loop for child-value in (cdr (assoc subelement value))
+                 ;; The table structure definition is recursive: we can
+                 ;; continue in the same fashion for all child values
+                 do (insert-value db child-value substructure
+                                  id-counters prepared-statements
+                                  :parent-id id)))))))
 
 (defun make-insert-query (table n-columns)
   "Create an insert query for TABLE with N-COLUMNS columns."
