@@ -16,6 +16,14 @@
 
 ;;;; Code:
 
+(in-package :jmdict)
+
+;; This is an unfortunate workaround for the fact that s-xml uses
+;; symbols for tag names and packages to represent the XML namespace
+;; of a tag
+(intern "lang" :xml)
+(export (find-symbol "lang" :xml) :xml)
+
 (defparameter *jmdict-structure*
   '(:|entry|
     ("Entry"
