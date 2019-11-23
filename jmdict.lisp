@@ -1,8 +1,18 @@
 ;;;; jmdict.lisp --- parsing and conversion code for JMDict and Kanjidic
 
+;;; Copyright 2019 Ian Johnson
+
+;;; This file is part of jmdict.el, a free software project for
+;;; integrating the JMDict and Kanjidic dictionaries into Emacs. You
+;;; are free to use, distribute and change the code in this project
+;;; subject to the MIT license included in the project root directory.
+
 ;;;; Commentary:
 
-;;; TODO
+;;; This file contains functions for converting the JMDict and
+;;; Kanjidic XML files to SQLite databases, which is a more convenient
+;;; format for quick access (much faster than parsing XML on the fly
+;;; for every query).
 
 ;;;; Code:
 
