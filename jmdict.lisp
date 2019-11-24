@@ -193,11 +193,11 @@ STRUCTURE is a database structure in the format of
                                (when (zerop (rem (incf n) 10000))
                                  (format *error-output*
                                          "Processed ~d entries" n)))
-                             :entities entities)))))
+                             :entities entities))))))
 
-  (defun insert-value (db value structure id-counters
-                       prepared-statements &key parent-id)
-    "Insert VALUE into DB according to STRUCTURE.
+(defun insert-value (db value structure id-counters
+                     prepared-statements &key parent-id)
+  "Insert VALUE into DB according to STRUCTURE.
 STRUCTURE is a list of table definitions like *JMDICT-STRUCTURE* that
 defines how to traverse VALUE and insert its components into the
 correct tables.
@@ -208,28 +208,28 @@ maintaining statements prepared for inserting rows into each table.
 
 PARENT-ID is the unique ID of the 'parent' element of this value (the
 enclosing XML element), if there is such a parent."
-    (destructuring-bind (table &rest columns) (first structure)
-      (let ((statement
-             (gethash-lazy table prepared-statements
-                           (prepare-non-query-statement
-                            db
-                            (make-insert-query table (1+ (length columns))))))
-            (column-values (mapcar (lambda (column)
-                                     (let ((path (third column)))
-                                       (case path
-                                         (:parent-id parent-id)
-                                         (t (structure-path path value)))))
-                                   columns))
-            (id (incf (gethash table id-counters 0))))
-        (apply statement id column-values)
-        ;; Process sub-structures
-        (loop for (subelement . substructure) in (rest structure)
-           do (loop for child-value in (cdr (assoc subelement value))
-                 ;; The table structure definition is recursive: we can
-                 ;; continue in the same fashion for all child values
-                 do (insert-value db child-value substructure
-                                  id-counters prepared-statements
-                                  :parent-id id)))))))
+  (destructuring-bind (table &rest columns) (first structure)
+    (let ((statement
+           (gethash-lazy table prepared-statements
+                         (prepare-non-query-statement
+                          db
+                          (make-insert-query table (1+ (length columns))))))
+          (column-values (mapcar (lambda (column)
+                                   (let ((path (third column)))
+                                     (case path
+                                       (:parent-id parent-id)
+                                       (t (structure-path path value)))))
+                                 columns))
+          (id (incf (gethash table id-counters 0))))
+      (apply statement id column-values)
+      ;; Process sub-structures
+      (loop for (subelement . substructure) in (rest structure)
+         do (loop for child-value in (cdr (assoc subelement value))
+               ;; The table structure definition is recursive: we can
+               ;; continue in the same fashion for all child values
+               do (insert-value db child-value substructure
+                                id-counters prepared-statements
+                                :parent-id id))))))
 
 (defun make-insert-query (table n-columns)
   "Create an insert query for TABLE with N-COLUMNS columns."

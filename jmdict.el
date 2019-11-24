@@ -17,6 +17,8 @@
 
 (require 'cl-lib)
 (require 'esqlite)
+(require 's)
+(require 'subr-x)
 
 (defgroup jmdict nil
   "An interface to the JMDict Japanese dictionary"
@@ -61,13 +63,13 @@
 (defconst jmdict--jm-basic-query
   "SELECT
 e.id AS entry_id,
-  k.reading AS kanji,
+  k.id AS kanji_id, k.reading AS kanji,
   r.id AS reading_id, r.reading AS kana,
-    rr.restriction,
+    rr.id AS restriction_id, rr.restriction,
   s.id AS sense_id,
-    scr.target AS cross_reference,
-    sa.target AS antonym,
-    spos.part_of_speech,
+    scr.id AS cross_reference_id, scr.target AS cross_reference,
+    sa.id AS antonym_id, sa.target AS antonym,
+    spos.id AS part_of_speech_id, spos.part_of_speech,
       g.id AS gloss_id, g.gloss, g.language AS gloss_language, g.gender AS gloss_gender, g.type AS gloss_type
 FROM Entry e
 LEFT JOIN Kanji k ON e.id = k.entry_id
@@ -80,16 +82,17 @@ JOIN Sense s ON e.id = s.entry_id
   JOIN Gloss g ON s.id = g.sense_id AND g.gloss IS NOT NULL")
 
 (defun jmdict--get-entries (filter)
+  "Find all JMdict entries matching FILTER."
   (let ((entries ()))
     (cl-labels ((process-row
                  (entry-id
-                  kanji
+                  kanji-id kanji
                   reading-id reading
-                  restriction
+                  restriction-id restriction
                   sense-id
-                  cross-reference
-                  antonym
-                  part-of-speech
+                  cross-reference-id cross-reference
+                  antonym-id antonym
+                  part-of-speech-id part-of-speech
                   gloss-id gloss gloss-language gloss-gender gloss-type)
                  (let* ((entry
                          (jmdict--get-or-push entry-id entries
@@ -134,14 +137,17 @@ JOIN Sense s ON e.id = s.entry_id
                                  (jmdict-jm-sense-parts-of-speech sense)
                                  :test #'equal)))))
       (let ((results
-             (esqlite-read "jmdict.sqlite3"
-                           (concat jmdict--jm-basic-query " " filter ";"))))
+             (nreverse (esqlite-read "jmdict.sqlite3"
+                                     (concat jmdict--jm-basic-query
+                                             " WHERE " filter
+                                             " ORDER BY k.id, r.id, rr.id, s.id, scr.id, sa.id, spos.id, g.id;")))))
         (dolist (row results)
           (apply #'process-row
                  (mapcar (lambda (e) (if (eql e :null) nil e)) row))))
+      ;; Fix order of lists in entries
       entries)))
 
-; (jmdict--get-entries "WHERE r.reading = 'かな'")
+; (jmdict--get-entries "r.reading = 'かな'")
 
 (defmacro jmdict--get-or-push (id place id-function new)
   (let ((var (gensym)))
@@ -165,18 +171,42 @@ inhibited for BODY."
        (let ((inhibit-read-only t))
          ,@body))))
 
-(jmdict--with-jmdict-buffer buffer
-  (erase-buffer)
-  (insert "テスト")
-  (display-buffer buffer))
+(defun jmdict--insert-entry (entries)
+  (dolist (kanji (jmdict-jm-entry-kanji-readings entry))
+    (insert kanji "\n"))
+  (newline)
+  (dolist (kana (jmdict-jm-entry-kana-readings entry))
+    (insert (jmdict-jm-kana-reading kana))
+    (when-let ((restrictions (jmdict-jm-kana-restrictions kana)))
+      (insert " " (s-join ", " restrictions)))
+    (newline))
+  (dolist (sense (jmdict-jm-entry-senses entry))
+    (when-let ((cross-references (jmdict-jm-sense-cross-references sense)))
+      (insert "Cross-references: " (s-join ", " cross-references) "\n"))
+    (when-let ((antonyms (jmdict-jm-sense-antonyms sense)))
+      (insert "Antonyms: " (s-join ", " antonyms) "\n"))
+    (when-let ((parts-of-speech (jmdict-jm-sense-parts-of-speech sense)))
+      (insert "Parts of speech: " (s-join ", " parts-of-speech) "\n"))
+    (dolist (gloss (jmdict-jm-sense-glosses sense))
+      (insert " - "
+              (jmdict-jm-gloss-gloss gloss)
+              " ("
+              (jmdict-jm-gloss-language gloss)
+              ")\n"))
+    (newline)))
 
-(let ((jmdict-buffer (get-buffer-create jmdict--buffer-name)))
-  (with-current-buffer jmdict-buffer
-    (jmdict-mode)
-    (let ((inhibit-read-only t))
+(defun jmdict (word)
+  (interactive "sWord: ")
+  (let* ((word-sql (esqlite-format-text word))
+         (entries (jmdict--get-entries (concat " k.reading = " word-sql
+                                               " or r.reading = " word-sql))))
+    (jmdict--with-jmdict-buffer buffer
       (erase-buffer)
-      (insert "Test")))
-  (display-buffer jmdict-buffer))
+      (dolist (entry entries)
+        (jmdict--insert-entry entry)
+        (newline))
+      (beginning-of-buffer)
+      (display-buffer buffer))))
 
 (define-derived-mode jmdict-mode special-mode "JMDict"
   "Major mode for JMDict definitions.")
