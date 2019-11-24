@@ -21,8 +21,9 @@
 ;; This is an unfortunate workaround for the fact that s-xml uses
 ;; symbols for tag names and packages to represent the XML namespace
 ;; of a tag
-(intern "lang" :xml)
-(export (find-symbol "lang" :xml) :xml)
+(eval-when (:compile-toplevel :load-toplevel)
+  (intern "lang" :xml)
+  (export (find-symbol "lang" :xml) :xml))
 
 (defparameter *jmdict-structure*
   '(:|entry|
@@ -30,44 +31,54 @@
      ("sequence_number" "INTEGER NOT NULL UNIQUE" (:|ent_seq| :text)))
     (:|k_ele|
      ("Kanji"
-      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id)
+      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
+                  :indexed t)
       ("reading" "TEXT NOT NULL" (:|keb| :text)
-                 :comment "Reading in kanji or other non-kana characters")))
+                 :comment "Reading in kanji or other non-kana characters"
+                 :indexed t)))
     (:|r_ele|
      ("Reading"
-      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id)
+      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
+                  :indexed t)
       ("reading" "TEXT NOT NULL" (:|reb| :text)
-                 :comment "Reading in kana"))
+                 :comment "Reading in kana"
+                 :indexed t))
      (:|re_restr|
       ("ReadingRestriction"
-       ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id)
+       ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id
+                     :indexed t)
        ("restriction" "TEXT NOT NULL" (:text)))))
     (:|sense|
      ("Sense"
-      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id))
+      ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
+                  :indexed t))
      (:|xref|
       ("SenseCrossReference"
-       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
        ("target" "TEXT NOT NULL" (:text)
                  :comment "A word in kanji or kana")))
      (:|ant|
       ("SenseAntonym"
-       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
        ("target" "TEXT NOT NULL" (:text)
                  :comment "A word in kanji or kana")))
      (:|pos|
       ("SensePartOfSpeech"
-       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
        ("part_of_speech" "TEXT NOT NULL" (:text))))
      (:|gloss|
       ("Gloss"
-       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id)
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
        ;; Note: the JMDict entry for 畜生 actually has a gloss element
        ;; with no contents (which, interestingly, is in Spanish).
        ;; Rather than try to figure out a way to accommodate this in
        ;; the code somehow, for now I've just removed the obvious NOT
        ;; NULL constraint.
-       ("gloss" "TEXT" (:text))
+       ("gloss" "TEXT" (:text) :indexed t)
        ("language" "TEXT NOT NULL" (:or (xml:|lang|) "eng")
                    :comment "The three-letter language code of the gloss")
        ("gender" "TEXT" (:|g_gend|)
@@ -83,10 +94,12 @@ corresponding to sub-elements in the XML file.
 
 Each table description is a list of the form (NAME &rest COLUMNS),
 where each column is itself a list of the form (NAME TYPE PATH &key
-:COMMENT). TYPE is a SQLite data type, including column constraints.
-PATH is a path (interpreted by STRUCTURE-PATH) to the data stored in
-the column. COMMENT is, optionally, a comment to include in the table
-schema (documentation).
+:COMMENT :INDEXED). TYPE is a SQLite data type, including column
+constraints. PATH is a path (interpreted by STRUCTURE-PATH) to the
+data stored in the column. COMMENT is, optionally, a comment to
+include in the table schema (documentation). INDEXED, if provided with
+a non-NIL value, indicates that an index should be created for the
+column.
 
 Following the table description, the rest of the structure is an alist
 of sub-structures, where the keys are sub-elements in the XML file.
@@ -99,33 +112,38 @@ Note: only one top-level element is supported (or needed).")
 (defparameter *kanjidic-structure*
   '(:|character|
     ("Character"
-     ("literal" "TEXT NOT NULL" (:|literal| :text))
+     ("literal" "TEXT NOT NULL" (:|literal| :text) :indexed t)
      ("grade" "INTEGER" (:|misc| :|grade| :text))
      ("stroke_count" "INTEGER" (:|misc| :|stroke_count| :text))
      ("jlpt_level" "INTEGER" (:|misc| :|jlpt| :text)))
     (:|reading_meaning|
      ("ReadingMeaning"
-      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id))
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t))
      (:|rmgroup|
       ("ReadingMeaningGroup"
-       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id))
+       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id
+                             :indexed t))
       (:|reading|
         ("Reading"
-         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id)
-         ("reading" "TEXT NOT NULL" (:text))
+         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
+                                     :indexed t)
+         ("reading" "TEXT NOT NULL" (:text) :indexed t)
          ("type" "TEXT NOT NULL" (:|r_type|))
          ("on_type" "TEXT" (:|on_type|))
          ("approved" "TEXT" (:|r_status|))))
       (:|meaning|
         ("Meaning"
-         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id)
-         ("meaning" "TEXT NOT NULL" (:text))
+         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
+                                     :indexed t)
+         ("meaning" "TEXT NOT NULL" (:text) :indexed t)
          ("language" "TEXT NOT NULL" (:or (:|m_lang|) "en")
                      :comment "The two-letter language code of the meaning"))))
      (:|nanori|
       ("Nanori"
-       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id)
-       ("nanori" "TEXT NOT NULL" (:text))))))
+       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id
+                             :indexed t)
+       ("nanori" "TEXT NOT NULL" (:text) :indexed t)))))
   "The structure of the Kanjidic XML file in the same format as *JMDICT-STRUCTURE*.")
 
 (defun convert-xml-to-sqlite (xml-path sqlite-path structure)
@@ -134,6 +152,7 @@ STRUCTURE is a database structure in the format of
 *JMDICT-STRUCTURE*."
   (sqlite:with-open-database (db sqlite-path)
     (create-tables db structure)
+    (create-indexes db structure)
     (insert-values db xml-path structure)))
 
 ;;; SQLite interaction
@@ -141,7 +160,8 @@ STRUCTURE is a database structure in the format of
 (defun create-tables (db structure)
   "Create the tables specified by STRUCTURE in DB, dropping them if they already exist."
   (labels ((format-column-string (stream column &optional last)
-             (destructuring-bind (name type path &key comment) column
+             (destructuring-bind (name type path &key comment &allow-other-keys)
+                 column
                (declare (ignore path))
                (format stream "~a ~a" name type)
                (unless last (format stream ","))
@@ -172,6 +192,29 @@ STRUCTURE is a database structure in the format of
       (loop for sub-structure in sub-structures
          do (create-tables db sub-structure)))))
 
+(defun create-indexes (db structure)
+  "Create the indexes specified by STRUCTURE in DB, dropping them if they exist."
+  (labels ((drop-index-if-exists (index-name)
+             (sqlite:execute-non-query
+              db (format nil "DROP INDEX IF EXISTS ~a" index-name)))
+           (create-index (table column)
+             (let ((index-name (format nil "~a_~a" table column)))
+               (drop-index-if-exists index-name)
+               (sqlite:execute-non-query
+                db (format nil "CREATE INDEX ~a ON ~a(~a)"
+                           index-name table column)))))
+    (destructuring-bind (element (table &rest columns) &rest sub-structures)
+        structure
+      (declare (ignore element))
+      (loop for column in columns
+         do (destructuring-bind (column type path
+                                             &key indexed &allow-other-keys)
+                column
+              (declare (ignore type path))
+              (when indexed (create-index table column))))
+      (loop for sub-structure in sub-structures
+         do (create-indexes db sub-structure)))))
+
 (defun insert-values (db xml-path structure)
   "Insert the data from XML-PATH into DB following STRUCTURE."
   (with-open-file (input xml-path)
@@ -192,7 +235,7 @@ STRUCTURE is a database structure in the format of
                                              id-counters prepared-statements)
                                (when (zerop (rem (incf n) 10000))
                                  (format *error-output*
-                                         "Processed ~d entries" n)))
+                                         "Processed ~d entries~%" n)))
                              :entities entities))))))
 
 (defun insert-value (db value structure id-counters
