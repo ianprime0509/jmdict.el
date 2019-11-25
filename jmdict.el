@@ -17,13 +17,27 @@
 
 (require 'cl-lib)
 (require 'esqlite)
-(require 's)
 (require 'subr-x)
 
 (defgroup jmdict nil
   "An interface to the JMDict Japanese dictionary"
   :prefix "jmdict-"
   :group 'applications)
+
+(defface jmdict-header
+  '((t . (:height 2.0 :weight bold)))
+  "Face for JMDict entry headers."
+  :group 'jmdict)
+
+(defface jmdict-kanji
+  '((t . (:height 1.5 :weight bold)))
+  "Face for JMDict non-primary kanji."
+  :group 'jmdict)
+
+(defface jmdict-kana
+  '((t . (:weight bold)))
+  "Face for JMDict kana readings."
+  :group 'jmdict)
 
 (defvar jmdict--buffer-name "*Jmdict*")
 
@@ -81,8 +95,8 @@ JOIN Sense s ON e.id = s.entry_id
   LEFT JOIN SensePartOfSpeech spos ON s.id = spos.sense_id
   JOIN Gloss g ON s.id = g.sense_id AND g.gloss IS NOT NULL")
 
-(defun jmdict--get-entries (filter)
-  "Find all JMdict entries matching FILTER."
+(defun jmdict--get-entries (ids)
+  "Find all JMdict entries with IDs in IDS."
   (let ((entries ()))
     (cl-labels ((process-row
                  (entry-id
@@ -139,15 +153,26 @@ JOIN Sense s ON e.id = s.entry_id
       (let ((results
              (nreverse (esqlite-read "jmdict.sqlite3"
                                      (concat jmdict--jm-basic-query
-                                             " WHERE " filter
-                                             " ORDER BY k.id, r.id, rr.id, s.id, scr.id, sa.id, spos.id, g.id;")))))
+                                             " WHERE e.id IN ("
+                                             (string-join ids ", ")
+                                             ") ORDER BY k.id, r.id, rr.id, s.id, scr.id, sa.id, spos.id, g.id;")))))
         (dolist (row results)
           (apply #'process-row
                  (mapcar (lambda (e) (if (eql e :null) nil e)) row))))
       ;; Fix order of lists in entries
       entries)))
 
-; (jmdict--get-entries "r.reading = 'かな'")
+(defun jmdict--search-entries (query)
+  "Search for JMDict entries matching QUERY.
+The return value is a list of entry IDs."
+  (apply #'append
+         (esqlite-read "jmdict.sqlite3"
+                       (format "SELECT e.id
+FROM Entry e
+JOIN Kanji k ON e.id = k.entry_id
+JOIN Reading r ON e.id = r.entry_id
+WHERE k.reading = %1$s OR r.reading = %1$s"
+                               (esqlite-format-text query)))))
 
 (defmacro jmdict--get-or-push (id place id-function new)
   (let ((var (gensym)))
@@ -156,6 +181,16 @@ JOIN Sense s ON e.id = s.entry_id
            ,var
          (push ,new ,place)
          (car ,place)))))
+
+;; JMDict entry utility functions
+
+(defun jmdict--primary-reading (entry)
+  "Return the primary reading for ENTRY.
+The primary reading is the first kanji if any kanji are available
+or the first kana reading."
+  (if (jmdict-jm-entry-kanji-readings entry)
+      (first (jmdict-jm-entry-kanji-readings entry))
+    (jmdict-jm-kana-reading (first (jmdict-jm-kana-readings entry)))))
 
 ;; JMDict buffer display
 
@@ -171,22 +206,35 @@ inhibited for BODY."
        (let ((inhibit-read-only t))
          ,@body))))
 
-(defun jmdict--insert-entry (entries)
-  (dolist (kanji (jmdict-jm-entry-kanji-readings entry))
-    (insert kanji "\n"))
-  (newline)
-  (dolist (kana (jmdict-jm-entry-kana-readings entry))
-    (insert (jmdict-jm-kana-reading kana))
-    (when-let ((restrictions (jmdict-jm-kana-restrictions kana)))
-      (insert " " (s-join ", " restrictions)))
-    (newline))
+(defun jmdict--insert-entry (entry)
+  ;; Readings
+  (let* ((primary (jmdict--primary-reading entry))
+         (kanji-readings
+          (cl-remove-if (lambda (s) (equal s primary))
+                        (jmdict-jm-entry-kanji-readings entry)))
+         (kana-readings
+          (cl-remove-if (lambda (r) (equal (jmdict-jm-kana-reading r)
+                                           primary))
+                        (jmdict-jm-entry-kana-readings entry))))
+    (insert (propertize primary 'face 'jmdict-header) "\n")
+    (when kanji-readings
+      (insert (propertize (string-join kanji-readings " ")
+                          'face 'jmdict-kanji) "\n"))
+    (dolist (kana kana-readings)
+      (insert (propertize (jmdict-jm-kana-reading kana)
+                          'face 'jmdict-kana))
+      (when-let ((restrictions (jmdict-jm-kana-restrictions kana)))
+        (insert " (applies only to " (string-join restrictions ", ") ")"))
+      (insert "\n")))
+  (insert "\n")
+  ;; Senses
   (dolist (sense (jmdict-jm-entry-senses entry))
-    (when-let ((cross-references (jmdict-jm-sense-cross-references sense)))
-      (insert "Cross-references: " (s-join ", " cross-references) "\n"))
-    (when-let ((antonyms (jmdict-jm-sense-antonyms sense)))
-      (insert "Antonyms: " (s-join ", " antonyms) "\n"))
     (when-let ((parts-of-speech (jmdict-jm-sense-parts-of-speech sense)))
-      (insert "Parts of speech: " (s-join ", " parts-of-speech) "\n"))
+      (insert (propertize (string-join parts-of-speech "\n") 'face 'bold) "\n"))
+    (when-let ((antonyms (jmdict-jm-sense-antonyms sense)))
+      (insert "Antonyms: " (string-join antonyms ", ") "\n"))
+    (when-let ((cross-references (jmdict-jm-sense-cross-references sense)))
+      (insert "See also: " (string-join cross-references ", ") "\n"))
     (dolist (gloss (jmdict-jm-sense-glosses sense))
       (insert " - "
               (jmdict-jm-gloss-gloss gloss)
@@ -198,8 +246,8 @@ inhibited for BODY."
 (defun jmdict (word)
   (interactive "sWord: ")
   (let* ((word-sql (esqlite-format-text word))
-         (entries (jmdict--get-entries (concat " k.reading = " word-sql
-                                               " or r.reading = " word-sql))))
+         (ids (jmdict--search-entries word))
+         (entries (jmdict--get-entries ids)))
     (jmdict--with-jmdict-buffer buffer
       (erase-buffer)
       (dolist (entry entries)
