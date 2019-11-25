@@ -35,23 +35,57 @@
                   :indexed t)
       ("reading" "TEXT NOT NULL" (:|keb| :text)
                  :comment "Reading in kanji or other non-kana characters"
-                 :indexed t)))
+                 :indexed t))
+     (:|ke_inf|
+      ("KanjiInfo"
+       ("kanji_id" "INTEGER NOT NULL REFERENCES Kanji(id)" :parent-id
+                   :indexed t)
+       ("info" "TEXT NOT NULL" (:text)
+               :comment "Information about kanji orthography")))
+     (:|ke_pri|
+      ("KanjiPriority"
+       ("kanji_id" "INTEGER NOT NULL REFERENCES Kanji(id)" :parent-id
+                   :indexed t)
+       ("priority" "TEXT NOT NULL" (:text)
+                   :comment "Indicator of relative kanji priority"))))
     (:|r_ele|
      ("Reading"
       ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
                   :indexed t)
       ("reading" "TEXT NOT NULL" (:|reb| :text)
                  :comment "Reading in kana"
-                 :indexed t))
+                 :indexed t)
+      ("re_nokanji" "INTEGER NOT NULL" (:if (:|re_nokanji|) 1 0)
+                    :comment "Indicates that this reading is not a true reading of the kanji"))
      (:|re_restr|
       ("ReadingRestriction"
        ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id
                      :indexed t)
-       ("restriction" "TEXT NOT NULL" (:text)))))
+       ("restriction" "TEXT NOT NULL" (:text))))
+     (:|re_inf|
+      ("ReadingInfo"
+       ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id
+                     :indexed t)
+       ("info" "TEXT NOT NULL" (:text)
+               :comment "Information about a specific reading")))
+     (:|re_pri|
+      ("ReadingPriority"
+       ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id
+                     :comment "Indicator of relative reading priority"))))
     (:|sense|
      ("Sense"
       ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
                   :indexed t))
+     (:|stagk|
+      ("SenseKanjiRestriction"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("restriction" "TEXT NOT NULL" (:text))))
+     (:|stagr|
+      ("SenseKanaRestriction"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("restriction" "TEXT NOT NULL" (:text))))
      (:|xref|
       ("SenseCrossReference"
        ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
@@ -69,22 +103,54 @@
        ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
                    :indexed t)
        ("part_of_speech" "TEXT NOT NULL" (:text))))
+     (:|field|
+      ("SenseField"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("field" "TEXT NOT NULL" (:text)
+                :comment "The field of application of the sense")))
+     (:|misc|
+      ("SenseMisc"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("info" "TEXT NOT NULL" (:text)
+               :comment "Additional information about the sense")))
+     (:|lsource|
+      ("SenseSource"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("word" "TEXT" (:text)
+               :comment "Word or phrase in source language")
+       ("language" "TEXT NOT NULL" (:or (xml:|lang|) "eng"))
+       ("type" "TEXT NOT NULL" (:or (:|ls_type|) "full")
+               :comment "Either 'full' or 'part' depending on whether this source description fully describes the source of the loan")
+       ("wasei" "TEXT NOT NULL" (:or (:|ls_wasei|) "n"))))
+     (:|dial|
+      ("SenseDialect"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("dialect" "TEXT NOT NULL" (:text)
+                  :comment "Dialect code for this sense")))
      (:|gloss|
       ("Gloss"
        ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
                    :indexed t)
        ;; Note: the JMDict entry for 畜生 actually has a gloss element
-       ;; with no contents (which, interestingly, is in Spanish).
-       ;; Rather than try to figure out a way to accommodate this in
-       ;; the code somehow, for now I've just removed the obvious NOT
-       ;; NULL constraint.
-       ("gloss" "TEXT" (:text) :indexed t)
+       ;; with no contents (which, interestingly, is in Spanish)
+       ("gloss" "TEXT NOT NULL" (:text) :indexed t
+                :constraints (:not-null))
        ("language" "TEXT NOT NULL" (:or (xml:|lang|) "eng")
                    :comment "The three-letter language code of the gloss")
        ("gender" "TEXT" (:|g_gend|)
                  :comment "The gender of the gloss")
        ("type" "TEXT" (:|g_type|)
-               :comment "The type (e.g. literal, figurative) of the gloss")))))
+               :comment "The type (e.g. literal, figurative) of the gloss")))
+     (:|s_inf|
+      ("SenseInfo"
+       ("sense_id" "INTEGER NOT NULL REFERENCES Sense(id)" :parent-id
+                   :indexed t)
+       ("info" "TEXT NOT NULL" (:text)
+               :comment "Additional information about the sense")))))
   "The structure of the JMDict database.
 The structure is represented as an alist of recursive 'trees' of
 elements, mimicking the schema of the original XML file. Each tree is
@@ -145,6 +211,22 @@ Note: only one top-level element is supported (or needed).")
                              :indexed t)
        ("nanori" "TEXT NOT NULL" (:text) :indexed t)))))
   "The structure of the Kanjidic XML file in the same format as *JMDICT-STRUCTURE*.")
+
+(define-condition constraint-violation-error (error)
+  ((column
+    :initarg :column
+    :initform (error "Must supply a column")
+    :reader column
+    :documentation "The name of the column violating the constraint")
+   (constraint
+    :initarg :constraint
+    :initform (error "Must supply a constraint")
+    :reader constraint
+    :documentation "The constraint violated"))
+  (:documentation "An error resulting from violating a constraint")
+  (:report (lambda (error stream)
+             (format stream "Constraint ~a violated for column ~a"
+                     (constraint error) (column error)))))
 
 (defun convert-xml-to-sqlite (xml-path sqlite-path structure)
   "Convert an XML file to a SQLite database following STRUCTURE.
@@ -257,14 +339,14 @@ enclosing XML element), if there is such a parent."
                          (prepare-non-query-statement
                           db
                           (make-insert-query table (1+ (length columns))))))
-          (column-values (mapcar (lambda (column)
-                                   (let ((path (third column)))
-                                     (case path
-                                       (:parent-id parent-id)
-                                       (t (structure-path path value)))))
-                                 columns))
           (id (incf (gethash table id-counters 0))))
-      (apply statement id column-values)
+      (handler-case
+          (apply statement id
+                 (mapcar (lambda (column)
+                           (column-value column value parent-id))
+                         columns))
+        (constraint-violation-error (e)
+          (format *error-output* "Warning: skipping record: ~a~%" e)))
       ;; Process sub-structures
       (loop for (subelement . substructure) in (rest structure)
          do (loop for child-value in (cdr (assoc subelement value))
@@ -273,6 +355,25 @@ enclosing XML element), if there is such a parent."
                do (insert-value db child-value substructure
                                 id-counters prepared-statements
                                 :parent-id id))))))
+
+(defun column-value (column value parent-id)
+  "Return the value of COLUMN evaluated in the context of VALUE.
+Signal a condition of type CONSTRAINT-VIOLATION-ERROR if any
+constraints on COLUMN are violated. Use PARENT-ID as the value of the
+special :PARENT-ID path if requested."
+  (destructuring-bind (name type path &key constraints &allow-other-keys)
+      column
+    (declare (ignore type))
+    (let ((value (case path
+                   (:parent-id parent-id)
+                   (t (structure-path path value)))))
+      (loop for constraint in constraints
+         do (case constraint
+              (:not-null (when (null value)
+                           (error 'constraint-violation-error
+                                  :column name
+                                  :constraint constraint)))))
+      value)))
 
 (defun make-insert-query (table n-columns)
   "Create an insert query for TABLE with N-COLUMNS columns."
@@ -300,14 +401,18 @@ the first element matching the tag extracted. For example, the
 path (:k_ele :keb :TEXT) would return the first kanji reading of an
 element. If the path cannot be followed completely, return NIL.
 
-As a special case, if PATH is of the form (:OR PATH VALUE), then VALUE
-will be returned instead of the value at PATH if the same is NIL."
-  (if (eql :or (first path))
-      (or (structure-path (second path) structure) (third path))
-      (loop with result = structure
-         for tag in path
-         do (setf result (cadr (assoc tag result)))
-         finally (return result))))
+Certain special 'operators' are supported:
+(:OR PATH DEFAULT) - return DEFAULT instead of the value at PATH if the same is NIL
+(:IF PATH TRUE-VALUE FALSE-VALUE) - if the value at PATH is not NIL, return TRUE-VALUE, else return FALSE-VALUE"
+  (case (first path)
+    (:or (destructuring-bind (path default) (rest path)
+           (or (structure-path path structure) default)))
+    (:if (destructuring-bind (path true-value false-value) (rest path)
+           (if (structure-path path structure) true-value false-value)))
+    (t (loop with result = structure
+          for tag in path
+          do (setf result (cadr (assoc tag result)))
+          finally (return result)))))
 
 (defun parse-xml-entries (input element handler &key entities)
     "Parse a stream of XML from INPUT and call HANDLER with the structure of every top-level ELEMENT.
