@@ -24,6 +24,12 @@
   :prefix "jmdict-"
   :group 'applications)
 
+(defcustom jmdict-jmdict-path
+  "jmdict.sqlite3"
+  "Path to the JMDict SQLite database."
+  :group 'jmdict
+  :type 'file)
+
 (defface jmdict-header
   '((t . (:height 2.0 :weight bold)))
   "Face for JMDict entry headers."
@@ -151,7 +157,7 @@ JOIN Sense s ON e.id = s.entry_id
                                  (jmdict-jm-sense-parts-of-speech sense)
                                  :test #'equal)))))
       (let ((results
-             (nreverse (esqlite-read "jmdict.sqlite3"
+             (nreverse (esqlite-read jmdict-jmdict-path
                                      (concat jmdict--jm-basic-query
                                              " WHERE e.id IN ("
                                              (string-join ids ", ")
@@ -166,7 +172,7 @@ JOIN Sense s ON e.id = s.entry_id
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
   (apply #'append
-         (esqlite-read "jmdict.sqlite3"
+         (esqlite-read jmdict-jmdict-path
                        (format "SELECT e.id
 FROM Entry e
 JOIN Kanji k ON e.id = k.entry_id
