@@ -51,142 +51,202 @@
   (let ((map (make-sparse-keymap)))
     map))
 
-;; Data types
-
-(cl-defstruct jmdict-jm-entry
-  id
-  (kanji-readings ())
-  (kana-readings ())
-  (senses ()))
-
-(cl-defstruct jmdict-jm-kana
-  id
-  reading
-  (restrictions ()))
-
-(cl-defstruct jmdict-jm-sense
-  id
-  (cross-references ())
-  (antonyms ())
-  (parts-of-speech ())
-  (glosses ()))
-
-(cl-defstruct jmdict-jm-gloss
-  id
-  gloss
-  language
-  (gender nil)
-  (type nil))
-
 ;; SQLite integration
 
-(defconst jmdict--jm-basic-query
-  "SELECT
-e.id AS entry_id,
-  k.id AS kanji_id, k.reading AS kanji,
-  r.id AS reading_id, r.reading AS kana,
-    rr.id AS restriction_id, rr.restriction,
-  s.id AS sense_id,
-    scr.id AS cross_reference_id, scr.target AS cross_reference,
-    sa.id AS antonym_id, sa.target AS antonym,
-    spos.id AS part_of_speech_id, spos.part_of_speech,
-      g.id AS gloss_id, g.gloss, g.language AS gloss_language, g.gender AS gloss_gender, g.type AS gloss_type
-FROM Entry e
-LEFT JOIN Kanji k ON e.id = k.entry_id
-JOIN Reading r ON e.id = r.entry_id
-  LEFT JOIN ReadingRestriction rr ON r.id = rr.reading_id
-JOIN Sense s ON e.id = s.entry_id
-  LEFT JOIN SenseCrossReference scr ON s.id = scr.sense_id
-  LEFT JOIN SenseAntonym sa ON s.id = sa.sense_id
-  LEFT JOIN SensePartOfSpeech spos ON s.id = spos.sense_id
-  JOIN Gloss g ON s.id = g.sense_id AND g.gloss IS NOT NULL")
+(defun jmdict--query (db spec where)
+  "Query DB and return the resulting data as a structure.
+
+WHERE is a filter expression provided in a simple s-expression
+format (the only conversion is to add parentheses and put the
+operator between the two operands if there are two operands).
+
+SPEC is a query specification, which takes the format (TABLE
+PARENT-ID COLUMNS &rest SUB-STRUCTURES).
+
+TABLE is the table from which to select COLUMNS. Every table is
+assumed to have a primary key column named id. PARENT-ID is the
+column in the child table referencing the primary key of the
+parent (ignored at the top level).
+
+SUB-STRUCTURES is a list of structures in child tables to join
+with the parent.
+
+The return value is a list of alists, where each alist contains
+the properties named by the columns and sub-tables are
+represented as lists with the property name the same as the
+sub-table name."
+  (let* ((rows-raw (esqlite-read db (jmdict--make-query spec where)))
+         ;; Esqlite uses :null instead of nil for null values, so we
+         ;; have to convert them all
+         (rows (mapcar (lambda (row)
+                         (mapcar (lambda (column)
+                                   (if (eql :null column) nil column))
+                                 row))
+                       rows-raw)))
+    (jmdict--parse-rows rows spec)))
+
+(defun jmdict--parse-rows (rows spec)
+  "Parse structured data from ROWS according to SPEC.
+The return value is in the same format as `jmdict--query'."
+  (cl-destructuring-bind (table parent-id columns &rest sub-specs)
+      spec
+    (declare (ignore table parent-id))
+    (let ((grouped-rows (jmdict--group-by-id rows)))
+      (mapcar (lambda (group)
+                (jmdict--structure-rows (cdr group) columns sub-specs))
+              grouped-rows))))
+
+(defun jmdict--structure-rows (rows columns sub-specs)
+  "A helper for `jmdict--parse-rows'.
+ROWS are the rows to process, COLUMNS are the columns for the
+top-level table and SUB-SPECS are the sub-tables to process."
+  (let (parsed
+        (consumed (1+ (length columns))))
+    ;; Populate the initial parsed alist with the column values
+    ;; of the first row
+    (cl-mapcar (lambda (column value)
+                 (setq parsed (cl-acons column value parsed)))
+               ;; We use rest below to ignore the initial (implicit)
+               ;; ID column
+               columns (rest (first rows)))
+    ;; Populate additional plist entries for sub-tables
+    (dolist (sub-spec sub-specs)
+      (let* ((rows (mapcar (lambda (row)
+                             (nthcdr consumed row))
+                           rows))
+             (sub-value (jmdict--parse-rows rows sub-spec)))
+        (cl-incf consumed (jmdict--n-columns sub-spec))
+        (setq parsed (cl-acons (first sub-spec) sub-value parsed))))
+    parsed))
+
+(defun jmdict--n-columns (spec)
+  "Return the number of columns in SPEC.
+This is the actual number of columns in the query, including any
+ID columns that are added implicitly."
+  (multiple-value-bind (tables columns)
+      (jmdict--parse-query-spec spec nil)
+    (declare (ignore tables))
+    (length columns)))
+
+(defun jmdict--group-by-id (rows)
+  "Group ROWS by the first column in each row.
+The order of the rows is preserved, and the return value is an
+alist."
+  (let (groups)
+    (dolist (row rows)
+      ;; Exclude rows where the ID is null
+      (when (first row)
+        (if-let ((assoc (assoc (first row) groups)))
+            (push row (cdr assoc))
+          (push (cons (first row) (list row)) groups))))
+    ;; Make sure each group is in order
+    (dolist (group groups)
+      (setf (cdr group) (nreverse (cdr group))))
+    (nreverse groups)))
+
+(defun jmdict--make-query (spec where)
+  "Return the SQL query corresponding to SPEC and WHERE.
+SPEC and WHERE are as described in `jmdict--query'."
+  (cl-multiple-value-bind (tables columns)
+      (jmdict--parse-query-spec spec nil)
+    (let ((columns (mapcar (lambda (column)
+                             (format "%s.%s"
+                                     (first column)
+                                     (second column)))
+                           columns))
+          (first-table (first (first tables)))
+          (rest-tables
+           (cl-loop for (table join-on) in (rest tables)
+                    collect (format "LEFT JOIN %s ON %s"
+                                    table
+                                    join-on)))
+          (id-columns (mapcar (lambda (table)
+                                (format "%s.id" (first table)))
+                              tables)))
+      (format "SELECT %s\nFROM %s\n%s\nWHERE %s\nORDER BY %s;"
+              (string-join columns ", ")
+              first-table
+              (string-join rest-tables "\n")
+              (jmdict--convert-sql-expression where)
+              (string-join id-columns ", ")))))
+
+(defun jmdict--convert-sql-expression (expr)
+  "Convert EXPR to a SQL expression.
+EXPR is just a normal SQL expression, but written in s-expression
+format."
+  (if (not (listp expr)) (format "%s" expr)
+    (cl-destructuring-bind (op &rest operands) expr
+      (case (length operands)
+        (1 (format "(%s %s)"
+                   op
+                   (jmdict--convert-sql-expression (first operands))))
+        (2 (format "(%s %s %s)"
+                   (jmdict--convert-sql-expression (first operands))
+                   op
+                   (jmdict--convert-sql-expression (second operands))))
+        (t (error "Expressions with %d operands are not supported"
+                  (length operands)))))))
+
+(defun jmdict--parse-query-spec (spec parent)
+  "Parse SPEC and return a list of tables and columns.
+The returned list is of the form (TABLES COLUMNS), where each
+element in TABLES is of the form (NAME JOIN-ON) and each element
+in columns is of the form (TABLE COLUMN).
+
+PARENT is the name of the parent table, or nil if there is none."
+  (cl-destructuring-bind (table parent-id columns &rest sub-specs)
+      spec
+    (let ((tables
+           (list (list table
+                       (when parent
+                         (format "%s.%s = %s.id" table parent-id parent)))))
+          (columns
+           (nconc (list (list table "id"))
+                  (mapcar (lambda (column) (list table column))
+                          columns))))
+      (dolist (sub-spec sub-specs)
+        (cl-multiple-value-bind (sub-tables sub-columns)
+            (jmdict--parse-query-spec sub-spec table)
+          (setq tables (nconc tables sub-tables))
+          (setq columns (nconc columns sub-columns))))
+      (cl-values tables columns))))
 
 (defun jmdict--get-entries (ids)
   "Find all JMdict entries with IDs in IDS."
-  (let ((entries ()))
-    (cl-labels ((process-row
-                 (entry-id
-                  kanji-id kanji
-                  reading-id reading
-                  restriction-id restriction
-                  sense-id
-                  cross-reference-id cross-reference
-                  antonym-id antonym
-                  part-of-speech-id part-of-speech
-                  gloss-id gloss gloss-language gloss-gender gloss-type)
-                 (let* ((entry
-                         (jmdict--get-or-push entry-id entries
-                                              #'jmdict-jm-entry-id
-                                              (make-jmdict-jm-entry :id entry-id)))
-                        (kana
-                         (jmdict--get-or-push reading-id
-                                              (jmdict-jm-entry-kana-readings entry)
-                                              #'jmdict-jm-kana-id
-                                              (make-jmdict-jm-kana :id reading-id
-                                                                   :reading reading)))
-                        (sense
-                         (jmdict--get-or-push sense-id
-                                              (jmdict-jm-entry-senses entry)
-                                              #'jmdict-jm-sense-id
-                                              (make-jmdict-jm-sense :id sense-id)))
-                        (gloss
-                         (jmdict--get-or-push gloss-id
-                                              (jmdict-jm-sense-glosses sense)
-                                              #'jmdict-jm-gloss-id
-                                              (make-jmdict-jm-gloss
-                                               :id gloss-id
-                                               :gloss gloss
-                                               :language gloss-language
-                                               :gender gloss-gender
-                                               :type gloss-type))))
-                   (when kanji
-                     (cl-pushnew kanji (jmdict-jm-entry-kanji-readings entry)
-                                 :test #'equal))
-                   (when restriction
-                     (cl-pushnew restriction (jmdict-jm-kana-restrictions kana)
-                                 :test #'equal))
-                   (when cross-reference
-                     (cl-pushnew cross-reference
-                                 (jmdict-jm-sense-cross-references sense)
-                                 :test #'equal))
-                   (when antonym
-                     (cl-pushnew antonym (jmdict-jm-sense-antonyms sense)
-                                 :test #'equal))
-                   (when part-of-speech
-                     (cl-pushnew part-of-speech
-                                 (jmdict-jm-sense-parts-of-speech sense)
-                                 :test #'equal)))))
-      (let ((results
-             (nreverse (esqlite-read jmdict-jmdict-path
-                                     (concat jmdict--jm-basic-query
-                                             " WHERE e.id IN ("
-                                             (string-join ids ", ")
-                                             ") ORDER BY k.id, r.id, rr.id, s.id, scr.id, sa.id, spos.id, g.id;")))))
-        (dolist (row results)
-          (apply #'process-row
-                 (mapcar (lambda (e) (if (eql e :null) nil e)) row))))
-      ;; Fix order of lists in entries
-      entries)))
+  (jmdict--query
+   jmdict-jmdict-path
+   '("Entry" nil ()
+     ("Kanji" "entry_id" ("reading")
+      ("KanjiInfo" "kanji_id" ("info")))
+     ("Reading" "entry_id" ("reading")
+      ("ReadingRestriction" "reading_id" ("restriction"))
+      ("ReadingInfo" "reading_id" ("info")))
+     ("Sense" "entry_id" ()
+      ("SenseKanjiRestriction" "sense_id" ("restriction"))
+      ("SenseKanaRestriction" "sense_id" ("restriction"))
+      ("SenseCrossReference" "sense_id" ("target"))
+      ("SenseAntonym" "sense_id" ("target"))
+      ("SensePartOfSpeech" "sense_id" ("part_of_speech"))
+      ("SenseField" "sense_id" ("field"))
+      ("Gloss" "sense_id" ("gloss" "type"))))
+   `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
+         (= "Gloss.language" "'eng'"))))
 
 (defun jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
-  (apply #'append
-         (esqlite-read jmdict-jmdict-path
-                       (format "SELECT e.id
-FROM Entry e
-JOIN Kanji k ON e.id = k.entry_id
-JOIN Reading r ON e.id = r.entry_id
-WHERE k.reading = %1$s OR r.reading = %1$s"
-                               (esqlite-format-text query)))))
-
-(defmacro jmdict--get-or-push (id place id-function new)
-  (let ((var (gensym)))
-    `(let ((,var (cl-find ,id ,place :key ,id-function :test #'equal)))
-       (if ,var
-           ,var
-         (push ,new ,place)
-         (car ,place)))))
+  (let* ((query-string (esqlite-format-text query))
+         (query-results
+          (jmdict--query
+           jmdict-jmdict-path
+           '("Entry" nil ("id")
+             ("Kanji" "entry_id" ())
+             ("Reading" "entry_id" ()))
+           `(or (= "Kanji.reading" ,query-string)
+                (= "Reading.reading" ,query-string)))))
+    (mapcar (lambda (entry)
+              (cdr (assoc "id" entry)))
+            query-results)))
 
 ;; JMDict entry utility functions
 
@@ -194,9 +254,8 @@ WHERE k.reading = %1$s OR r.reading = %1$s"
   "Return the primary reading for ENTRY.
 The primary reading is the first kanji if any kanji are available
 or the first kana reading."
-  (if (jmdict-jm-entry-kanji-readings entry)
-      (first (jmdict-jm-entry-kanji-readings entry))
-    (jmdict-jm-kana-reading (first (jmdict-jm-kana-readings entry)))))
+  (or (cdr (assoc "reading" (first (cdr (assoc "Kanji" entry)))))
+      (cdr (assoc "reading" (first (cdr (assoc "Reading" entry)))))))
 
 ;; JMDict buffer display
 
@@ -216,38 +275,57 @@ inhibited for BODY."
   ;; Readings
   (let* ((primary (jmdict--primary-reading entry))
          (kanji-readings
-          (cl-remove-if (lambda (s) (equal s primary))
-                        (jmdict-jm-entry-kanji-readings entry)))
-         (kana-readings
-          (cl-remove-if (lambda (r) (equal (jmdict-jm-kana-reading r)
+          (cl-remove-if (lambda (s) (equal (cdr (assoc "reading" s))
                                            primary))
-                        (jmdict-jm-entry-kana-readings entry))))
+                        (cdr (assoc "Kanji" entry))))
+         (kana-readings
+          (cl-remove-if (lambda (r) (equal (cdr (assoc "reading" r))
+                                           primary))
+                        (cdr (assoc "Reading" entry)))))
     (insert (propertize primary 'face 'jmdict-header) "\n")
-    (when kanji-readings
-      (insert (propertize (string-join kanji-readings " ")
-                          'face 'jmdict-kanji) "\n"))
+    (dolist (kanji kanji-readings)
+      (insert (propertize (cdr (assoc "reading" kanji))
+                          'face 'jmdict-kanji))
+      (when-let ((info (mapcar (lambda (i)
+                                 (cdr (assoc "info" i)))
+                               (cdr (assoc "KanjiInfo" kanji)))))
+        (insert " (" (string-join info ", ") ")"))
+      (insert "\n"))
     (dolist (kana kana-readings)
-      (insert (propertize (jmdict-jm-kana-reading kana)
+      (insert (propertize (cdr (assoc "reading" kana))
                           'face 'jmdict-kana))
-      (when-let ((restrictions (jmdict-jm-kana-restrictions kana)))
+      (when-let ((info (mapcar (lambda (i)
+                                 (cdr (assoc "info" i)))
+                               (cdr (assoc "ReadingInfo" kana))))))
+      (when-let ((restrictions
+                  (mapcar (lambda (r)
+                            (cdr (assoc "restriction" r)))
+                          (cdr (assoc "ReadingRestriction" kana)))))
         (insert " (applies only to " (string-join restrictions ", ") ")"))
       (insert "\n")))
   (insert "\n")
   ;; Senses
-  (dolist (sense (jmdict-jm-entry-senses entry))
-    (when-let ((parts-of-speech (jmdict-jm-sense-parts-of-speech sense)))
-      (insert (propertize (string-join parts-of-speech "\n") 'face 'bold) "\n"))
-    (when-let ((antonyms (jmdict-jm-sense-antonyms sense)))
+  (dolist (sense (cdr (assoc "Sense" entry)))
+    (when-let ((parts-of-speech
+                (mapcar (lambda (p)
+                          (cdr (assoc "part_of_speech" p)))
+                        (cdr (assoc "SensePartOfSpeech" sense)))))
+      (insert (propertize (string-join parts-of-speech "\n")
+                          'face 'bold)
+              "\n"))
+    (when-let ((antonyms
+                (mapcar (lambda (a)
+                          (cdr (assoc "target" a)))
+                        (cdr (assoc "SenseAntonym" sense)))))
       (insert "Antonyms: " (string-join antonyms ", ") "\n"))
-    (when-let ((cross-references (jmdict-jm-sense-cross-references sense)))
+    (when-let ((cross-references
+                (mapcar (lambda (c)
+                          (cdr (assoc "target" c)))
+                        (cdr (assoc "SenseCrossReference" sense)))))
       (insert "See also: " (string-join cross-references ", ") "\n"))
-    (dolist (gloss (jmdict-jm-sense-glosses sense))
-      (insert " - "
-              (jmdict-jm-gloss-gloss gloss)
-              " ("
-              (jmdict-jm-gloss-language gloss)
-              ")\n"))
-    (newline)))
+    (dolist (gloss (cdr (assoc "Gloss" sense)))
+      (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
+    (insert "\n")))
 
 (defun jmdict (word)
   (interactive "sWord: ")
@@ -258,7 +336,7 @@ inhibited for BODY."
       (erase-buffer)
       (dolist (entry entries)
         (jmdict--insert-entry entry)
-        (newline))
+        (insert "\n"))
       (beginning-of-buffer)
       (display-buffer buffer))))
 
