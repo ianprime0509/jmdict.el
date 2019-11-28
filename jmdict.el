@@ -2,6 +2,14 @@
 
 ;; Copyright 2019 Ian Johnson
 
+;; Author: Ian Johnson <ianprime0509@gmail.com>
+;; Version: 0.1.0
+;; Keywords: tools
+;; URL: https://github.com/ianprime0509/jmdict.el
+;; Package-Requires: (cl-lib esqlite subr-x)
+
+;; This file is not part of GNU Emacs.
+
 ;; This file is part of jmdict.el, a free software project for
 ;; integrating the JMDict and Kanjidic dictionaries into Emacs. You
 ;; are free to use, distribute and change the code in this project
@@ -9,7 +17,11 @@
 
 ;;; Commentary:
 
-;; TODO
+;; This is an interface for the JMDict and Kanjidic Japanese
+;; dictionary files, providing a convenient Japanese dictionary within
+;; Emacs. Prior to using this package, the raw XML files must be
+;; converted to SQLite databases using the supporting Common Lisp code
+;; in the project root.
 
 ;;; Code:
 
