@@ -45,14 +45,6 @@
   "Face for JMDict kana readings."
   :group 'jmdict)
 
-(defvar jmdict--buffer-name "*Jmdict*")
-
-(defvar jmdict-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") #'jmdict-next-entry)
-    (define-key map (kbd "p") #'jmdict-previous-entry)
-    map))
-
 ;; SQLite integration
 
 (defun jmdict--query (db spec where)
@@ -261,6 +253,8 @@ or the first kana reading."
 
 ;; JMDict buffer display
 
+(defvar jmdict--buffer-name "*Jmdict*")
+
 (define-button-type 'jmdict-reference
   'help-echo "mouse-2, RET: Follow reference"
   'follow-link t
@@ -356,13 +350,54 @@ BUFFER will be bound to the buffer in BODY. The JMDict buffer
 will be placed in `jmdict-mode' and read-only mode will be
 inhibited for BODY."
   (declare (indent 1))
-  `(let ((,buffer (get-buffer-create jmdict--buffer-name)))
+  `(let ((,buffer (get-buffer jmdict--buffer-name)))
+     (unless ,buffer
+       (setq ,buffer (get-buffer-create jmdict--buffer-name))
+       (with-current-buffer ,buffer
+         (jmdict-mode)))
      (with-current-buffer ,buffer
-       (jmdict-mode)
        (let ((inhibit-read-only t))
-         ,@body))))
+         ,@body)
+       (set-buffer-modified-p nil))))
 
 ;; Interactive commands
+
+(defvar jmdict-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'jmdict)
+    (define-key map (kbd "l") #'jmdict-go-back)
+    (define-key map (kbd "r") #'jmdict-go-forward)
+    (define-key map (kbd "n") #'jmdict-next-entry)
+    (define-key map (kbd "p") #'jmdict-previous-entry)
+    map))
+
+(defvar-local jmdict--history-back-stack ()
+  "The stack of previous history entries.
+Each element on the stack is of the form (QUERY . POSITION),
+where QUERY is the query associated with the buffer and POSITION
+is the position of point.")
+
+(defvar-local jmdict--history-forward-stack ()
+  "The stack of next history entries.
+Each element on the stack is of the same form as
+`jmdict--history-back-stack'.")
+
+(defvar-local jmdict--query nil
+  "The query associated with the current buffer.")
+
+(defun jmdict--display-query-result (query)
+  "Find and display all entries matching QUERY.
+Clear the current buffer, insert the formatted entries matching
+QUERY and navigate to the beginning of the buffer. Update the
+history stacks as appropriate."
+  (let ((inhibit-read-only t))
+    (let* ((ids (jmdict--search-entries query))
+           (entries (jmdict--get-entries ids)))
+      (erase-buffer)
+      (dolist (entry entries)
+        (jmdict--insert-entry entry)
+        (insert "\n"))
+      (goto-char (point-min)))))
 
 (defun jmdict--move-beginning-of-header ()
   "Move to the beginning of the header under point.
@@ -377,6 +412,33 @@ If point is not on a header, do nothing."
   (when (get-text-property (point) 'jmdict-header)
     (when-let ((end (next-single-property-change (point) 'jmdict-header)))
       (goto-char end))))
+
+(defun jmdict-go-back ()
+  "Go back to the results of the previous query."
+  (interactive)
+  (if-let ((back (pop jmdict--history-back-stack)))
+      (progn
+        (when jmdict--query
+          (push (cons jmdict--query (point)) jmdict--history-forward-stack))
+        (setq jmdict--query (car back))
+        (jmdict--display-query-result (car back))
+        (goto-char (cdr back))
+        (recenter))
+    (message "No previous query")))
+
+(defun jmdict-go-forward ()
+  "Go forward to the results of the next query.
+This undoes the action of `jmdict-go-back'."
+  (interactive)
+  (if-let ((forward (pop jmdict--history-forward-stack)))
+      (progn
+        (when jmdict--query
+          (push (cons jmdict--query (point)) jmdict--history-back-stack))
+        (setq jmdict--query (car forward))
+        (jmdict--display-query-result (car forward))
+        (goto-char (cdr forward))
+        (recenter))
+    (message "No next query")))
 
 (defun jmdict-next-entry (arg)
   "Navigate ARG entries forward.
@@ -412,23 +474,19 @@ of the window."
 
 ;; Main function and mode
 
-(defun jmdict (word)
-  (interactive "sWord: ")
-  (let* ((word-sql (esqlite-format-text word))
-         (ids (jmdict--search-entries word))
-         (entries (jmdict--get-entries ids)))
-    (jmdict--with-jmdict-buffer buffer
-      (buffer-disable-undo)
-      (erase-buffer)
-      (dolist (entry entries)
-        (jmdict--insert-entry entry)
-        (insert "\n"))
-      (goto-char (point-min))
-      (set-buffer-modified-p nil)
-      (display-buffer buffer))))
+(defun jmdict (query)
+  (interactive "sQuery: ")
+  (jmdict--with-jmdict-buffer buffer
+    (when jmdict--query
+      (push (cons jmdict--query (point)) jmdict--history-back-stack))
+    (setq jmdict--history-forward-stack ())
+    (setq jmdict--query query)
+    (jmdict--display-query-result query)
+    (display-buffer buffer)))
 
 (define-derived-mode jmdict-mode special-mode "JMDict"
-  "Major mode for JMDict definitions.")
+  "Major mode for JMDict definitions."
+  (buffer-disable-undo))
 
 (provide 'jmdict)
 ;;; jmdict.el ends here
