@@ -108,7 +108,7 @@ top-level table and SUB-SPECS are the sub-tables to process."
                  (setq parsed (cl-acons column value parsed)))
                ;; We use rest below to ignore the initial (implicit)
                ;; ID column
-               columns (rest (first rows)))
+               columns (cl-rest (first rows)))
     ;; Populate additional plist entries for sub-tables
     (dolist (sub-spec sub-specs)
       (let* ((rows (mapcar (lambda (row)
@@ -156,7 +156,7 @@ SPEC and WHERE are as described in `jmdict--query'."
                            columns))
           (first-table (first (first tables)))
           (rest-tables
-           (cl-loop for (table join-on) in (rest tables)
+           (cl-loop for (table join-on) in (cl-rest tables)
                     collect (format "LEFT JOIN %s ON %s"
                                     table
                                     join-on)))
@@ -259,6 +259,21 @@ or the first kana reading."
 
 ;; JMDict buffer display
 
+(define-button-type 'jmdict-reference
+  'help-echo "mouse-2, RET: Follow reference"
+  'follow-link t
+  'action #'jmdict--follow-reference)
+
+(defconst jmdict--reference-separator "・"
+  "The string that separates parts of a reference.")
+
+(defun jmdict--follow-reference (button)
+  "Follow the reference linked by BUTTON."
+  ;; TODO: not all references are just a single word; some reference
+  ;; only part of a definition
+  (jmdict (first (split-string (button-label button)
+                               jmdict--reference-separator))))
+
 (defmacro jmdict--with-jmdict-buffer (buffer &rest body)
   "Evaluate BODY with the JMDict buffer as the current buffer.
 BUFFER will be bound to the buffer in BODY. The JMDict buffer
@@ -317,12 +332,20 @@ inhibited for BODY."
                 (mapcar (lambda (a)
                           (cdr (assoc "target" a)))
                         (cdr (assoc "SenseAntonym" sense)))))
-      (insert "Antonyms: " (string-join antonyms ", ") "\n"))
+      (insert "Antonyms: ")
+      (cl-loop for ant on antonyms
+               do (insert-button (first ant) 'type 'jmdict-reference)
+               unless (cl-endp (cl-rest ant)) do (insert ", "))
+      (insert "\n"))
     (when-let ((cross-references
                 (mapcar (lambda (c)
                           (cdr (assoc "target" c)))
                         (cdr (assoc "SenseCrossReference" sense)))))
-      (insert "See also: " (string-join cross-references ", ") "\n"))
+      (insert "See also: ")
+      (cl-loop for ref on cross-references
+               do (insert-button (first ref) 'type 'jmdict-reference)
+               unless (cl-endp (cl-rest ref)) do (insert ", "))
+      (insert "\n"))
     (dolist (gloss (cdr (assoc "Gloss" sense)))
       (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
     (insert "\n")))
@@ -333,11 +356,13 @@ inhibited for BODY."
          (ids (jmdict--search-entries word))
          (entries (jmdict--get-entries ids)))
     (jmdict--with-jmdict-buffer buffer
+      (buffer-disable-undo)
       (erase-buffer)
       (dolist (entry entries)
         (jmdict--insert-entry entry)
         (insert "\n"))
       (beginning-of-buffer)
+      (set-buffer-modified-p nil)
       (display-buffer buffer))))
 
 (define-derived-mode jmdict-mode special-mode "JMDict"
