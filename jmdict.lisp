@@ -181,35 +181,68 @@ Note: only one top-level element is supported (or needed).")
      ("literal" "TEXT NOT NULL" (:|literal| :text) :indexed t)
      ("grade" "INTEGER" (:|misc| :|grade| :text))
      ("stroke_count" "INTEGER" (:|misc| :|stroke_count| :text))
+     ("frequency" "INTEGER" (:|misc| :|freq| :text)
+      :comment "Relative kanji frequency, from 1 (most frequent) to 2500")
      ("jlpt_level" "INTEGER" (:|misc| :|jlpt| :text)))
-    (:|reading_meaning|
-     ("ReadingMeaning"
+    ((:|codepoint| :|cp_value|)
+     ("Codepoint"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t)
+      ("codepoint" "TEXT NOT NULL" (:text))
+      ("type" "TEXT NOT NULL" (:|cp_type|))))
+    ((:|radical| :|rad_value|)
+     ("Radical"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t)
+      ("radical" "INTEGER NOT NULL" (:text))
+      ("type" "TEXT NOT NULL" (:|rad_type|))))
+    ((:|misc| :|variant|)
+     ("Variant"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t)
+      ("variant" "TEXT NOT NULL" (:text))
+      ("type" "TEXT NOT NULL" (:|var_type|))))
+    ((:|dic_number| :|dic_ref|)
+     ("DictionaryReference"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t)
+      ("reference" "INTEGER NOT NULL" (:text))
+      ("type" "TEXT NOT NULL" (:|dr_type|))
+      ("volume" "INTEGER" (:|m_vol|)
+                :comment "Volume number for Daikanwajiten (moro)")
+      ("page" "INTEGER" (:|m_page|)
+              :comment "Page number for Daikanwajiten (moro)")))
+    ((:|query_code| :|q_code|)
+     ("QueryCode"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t)
+      ("code" "TEXT NOT NULL" (:text))
+      ("type" "TEXT NOT NULL" (:|qc_type|))
+      ("skip_misclass" "TEXT" (:|skip_misclass|))))
+    ((:|reading_meaning| :|rmgroup|)
+     ("ReadingMeaningGroup"
       ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
                       :indexed t))
-     (:|rmgroup|
-      ("ReadingMeaningGroup"
-       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id
-                             :indexed t))
-      (:|reading|
-        ("Reading"
-         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
-                                     :indexed t)
-         ("reading" "TEXT NOT NULL" (:text) :indexed t)
-         ("type" "TEXT NOT NULL" (:|r_type|))
-         ("on_type" "TEXT" (:|on_type|))
-         ("approved" "TEXT" (:|r_status|))))
-      (:|meaning|
-        ("Meaning"
-         ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
-                                     :indexed t)
-         ("meaning" "TEXT NOT NULL" (:text) :indexed t)
-         ("language" "TEXT NOT NULL" (:or (:|m_lang|) "en")
-                     :comment "The two-letter language code of the meaning"))))
-     (:|nanori|
-      ("Nanori"
-       ("reading_meaning_id" "INTEGER NOT NULL REFERENCES ReadingMeaning(id)" :parent-id
-                             :indexed t)
-       ("nanori" "TEXT NOT NULL" (:text) :indexed t)))))
+     (:|reading|
+      ("Reading"
+       ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
+                                   :indexed t)
+       ("reading" "TEXT NOT NULL" (:text) :indexed t)
+       ("type" "TEXT NOT NULL" (:|r_type|))
+       ("on_type" "TEXT" (:|on_type|))
+       ("approved" "TEXT" (:|r_status|))))
+     (:|meaning|
+      ("Meaning"
+       ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
+                                   :indexed t)
+       ("meaning" "TEXT NOT NULL" (:text) :indexed t)
+       ("language" "TEXT NOT NULL" (:or (:|m_lang|) "en")
+                   :comment "The two-letter language code of the meaning"))))
+    ((:|reading_meaning| :|nanori|)
+     ("Nanori"
+      ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
+                      :indexed t)
+      ("nanori" "TEXT NOT NULL" (:text) :indexed t))))
   "The structure of the Kanjidic XML file in the same format as *JMDICT-STRUCTURE*.")
 
 (define-condition constraint-violation-error (error)
@@ -236,6 +269,34 @@ STRUCTURE is a database structure in the format of
     (create-tables db structure)
     (create-indexes db structure)
     (insert-values db xml-path structure)))
+
+;; Macros
+
+(defmacro gethash-lazy (key table default)
+  "Return the value of KEY in the hash table TABLE with a (lazily computed) default value DEFAULT."
+  (let ((value (gensym))
+        (present-p (gensym)))
+    `(multiple-value-bind (,value ,present-p) (gethash ,key ,table)
+       (if ,present-p
+           (values ,value t)
+           (let ((,value ,default))
+             (setf (gethash ,key ,table) ,value)
+             (values ,value t))))))
+
+(defmacro loop-substructures (var path structure &body body)
+  "Loop over all sub-structures of STRUCTURE by following PATH.
+Bind each sub-structure to VAR and execute BODY for each
+sub-structure. As a special case, PATH may be a single symbol.
+
+For example, using this macro with the path (:codepoint :cp_value)
+will iterate over all the cp_value elements in all the codepoint
+elements in STRUCTURE."
+  (ctypecase path
+    (symbol `(loop for ,var in (cdr (assoc ,path ,structure))
+                do ,@body))
+    (list (let ((loop-var (gensym)))
+            `(loop for ,loop-var in (cdr (assoc ,(first path) ,structure))
+                do (loop-substructures ,var ,(rest path) ,loop-var ,body))))))
 
 ;;; SQLite interaction
 
@@ -290,7 +351,7 @@ STRUCTURE is a database structure in the format of
       (declare (ignore element))
       (loop for column in columns
          do (destructuring-bind (column type path
-                                             &key indexed &allow-other-keys)
+                                        &key indexed &allow-other-keys)
                 column
               (declare (ignore type path))
               (when indexed (create-index table column))))
@@ -348,13 +409,11 @@ enclosing XML element), if there is such a parent."
         (constraint-violation-error (e)
           (format *error-output* "Warning: skipping record: ~a~%" e)))
       ;; Process sub-structures
-      (loop for (subelement . substructure) in (rest structure)
-         do (loop for child-value in (cdr (assoc subelement value))
-               ;; The table structure definition is recursive: we can
-               ;; continue in the same fashion for all child values
-               do (insert-value db child-value substructure
-                                id-counters prepared-statements
-                                :parent-id id))))))
+      (loop for (path . substructure) in (rest structure)
+         do (loop-substructures child-value path value
+                 (insert-value db child-value substructure
+                               id-counters prepared-statements
+                               :parent-id id))))))
 
 (defun column-value (column value parent-id)
   "Return the value of COLUMN evaluated in the context of VALUE.
@@ -397,9 +456,11 @@ special :PARENT-ID path if requested."
 (defun structure-path (path structure)
   "Return the result of following PATH in STRUCTURE.
 PATH is a list of tag names: each tag will be followed in sequence and
-the first element matching the tag extracted. For example, the
-path (:k_ele :keb :TEXT) would return the first kanji reading of an
-element. If the path cannot be followed completely, return NIL.
+the first element matching the tag extracted.
+
+For example, the path (:k_ele :keb :TEXT) would return the first kanji
+reading of an element. If the path cannot be followed completely,
+return NIL.
 
 Certain special 'operators' are supported:
 (:OR PATH DEFAULT) - return DEFAULT instead of the value at PATH if the same is NIL
@@ -415,7 +476,7 @@ Certain special 'operators' are supported:
           finally (return result)))))
 
 (defun parse-xml-entries (input element handler &key entities)
-    "Parse a stream of XML from INPUT and call HANDLER with the structure of every top-level ELEMENT.
+  "Parse a stream of XML from INPUT and call HANDLER with the structure of every top-level ELEMENT.
 The structure of an XML element is an alist where the keys are element
 names and the values are lists of the structures of all sub-elements
 with the corresponding name. Attribute values are treated the same way
@@ -427,41 +488,41 @@ structure of XML; it is just good enough to process 'structured' data
 formats like JMDict and Kanjidic.
 
 ENTITIES is a hashtable giving the expansions of XML entities."
-    (labels ((add-element (alist key value)
-               (let ((assoc (assoc key alist)))
-                 (if assoc
-                     (prog1 alist
-                       (setf (cdr assoc) (nconc (cdr assoc) (list value))))
-                     (cons (list key value) alist))))
-             (convert-attributes (attributes)
-               (mapcar (lambda (attr)
-                         (cons (car attr) (list (cdr attr))))
-                       attributes))
-             (new-element-hook (name attributes seed)
-               (declare (ignore name attributes seed))
-               ())
-             (finish-element-hook (name attributes parent-seed seed)
-               (let ((structure (append (convert-attributes attributes)
-                                        seed)))
-                 (if (eql name element)
-                     ;; If we're at the target element, all we need to
-                     ;; do is call our handler
-                     (funcall handler structure)
-                     ;; Otherwise, we need to append this element's
-                     ;; structure to the parent's list of elements
-                     ;; with this name
-                     (add-element parent-seed name structure))))
-             (text-hook (string seed)
-               (add-element seed :text string)))
-      (s-xml:start-parse-xml
-       input
-       (make-instance 's-xml:xml-parser-state
-                      :entities (or entities (s-xml::make-standard-entities))
-                      :seed ()
-                      :new-element-hook #'new-element-hook
-                      :finish-element-hook #'finish-element-hook
-                      :text-hook #'text-hook)))
-    nil)
+  (labels ((add-element (alist key value)
+             (let ((assoc (assoc key alist)))
+               (if assoc
+                   (prog1 alist
+                     (setf (cdr assoc) (nconc (cdr assoc) (list value))))
+                   (cons (list key value) alist))))
+           (convert-attributes (attributes)
+             (mapcar (lambda (attr)
+                       (cons (car attr) (list (cdr attr))))
+                     attributes))
+           (new-element-hook (name attributes seed)
+             (declare (ignore name attributes seed))
+             ())
+           (finish-element-hook (name attributes parent-seed seed)
+             (let ((structure (append (convert-attributes attributes)
+                                      seed)))
+               (if (eql name element)
+                   ;; If we're at the target element, all we need to
+                   ;; do is call our handler
+                   (funcall handler structure)
+                   ;; Otherwise, we need to append this element's
+                   ;; structure to the parent's list of elements
+                   ;; with this name
+                   (add-element parent-seed name structure))))
+           (text-hook (string seed)
+             (add-element seed :text string)))
+    (s-xml:start-parse-xml
+     input
+     (make-instance 's-xml:xml-parser-state
+                    :entities (or entities (s-xml::make-standard-entities))
+                    :seed ()
+                    :new-element-hook #'new-element-hook
+                    :finish-element-hook #'finish-element-hook
+                    :text-hook #'text-hook)))
+  nil)
 
 (defun parse-xml-entities (input)
   "Parse a stream of XML from INPUT and return a hashtable with all entities found in the DOCTYPE (as well as all standard XML entities)."
@@ -473,25 +534,12 @@ ENTITIES is a hashtable giving the expansions of XML entities."
   ;; Unfortunately, make-standard-entities is not exported in s-xml
   (loop with entities = (s-xml::make-standard-entities)
      and entity-scanner = (ppcre:create-scanner
-                               "<!ENTITY +([^ ]+) +\"([^\"]+)\">")
+                           "<!ENTITY +([^ ]+) +\"([^\"]+)\">")
      and end-scanner = (ppcre:create-scanner "]>")
      for line = (read-line input nil)
      do (ppcre:register-groups-bind (entity expansion) (entity-scanner line)
           (setf (gethash entity entities) expansion))
      when (ppcre:scan end-scanner line)
      return entities))
-
-;;; Utility functions
-
-(defmacro gethash-lazy (key table default)
-  "Return the value of KEY in the hash table TABLE with a (lazily computed) default value DEFAULT."
-  (let ((value (gensym))
-        (present-p (gensym)))
-    `(multiple-value-bind (,value ,present-p) (gethash ,key ,table)
-       (if ,present-p
-           (values ,value t)
-           (let ((,value ,default))
-             (setf (gethash ,key ,table) ,value)
-             (values ,value t))))))
 
 ;;;; jmdict.lisp ends here

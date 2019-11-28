@@ -487,6 +487,7 @@ of the window."
 ;; Main function and mode
 
 (defun jmdict (query)
+  "Query JMDict for QUERY and display the results."
   (interactive "sQuery: ")
   (jmdict--with-jmdict-buffer buffer
     (when jmdict--query
