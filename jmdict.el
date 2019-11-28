@@ -49,6 +49,8 @@
 
 (defvar jmdict-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "n") #'jmdict-next-entry)
+    (define-key map (kbd "p") #'jmdict-previous-entry)
     map))
 
 ;; SQLite integration
@@ -274,17 +276,14 @@ or the first kana reading."
   (jmdict (first (split-string (button-label button)
                                jmdict--reference-separator))))
 
-(defmacro jmdict--with-jmdict-buffer (buffer &rest body)
-  "Evaluate BODY with the JMDict buffer as the current buffer.
-BUFFER will be bound to the buffer in BODY. The JMDict buffer
-will be placed in `jmdict-mode' and read-only mode will be
-inhibited for BODY."
-  (declare (indent 1))
-  `(let ((,buffer (get-buffer-create jmdict--buffer-name)))
-     (with-current-buffer ,buffer
-       (jmdict-mode)
-       (let ((inhibit-read-only t))
-         ,@body))))
+(defun jmdict--insert-entry-header (header)
+  "Insert HEADER as an entry header.
+This adds text properties to HEADER so that the `jmdict-header'
+face is used and a special `jmdict-header' property is present to
+make it easier to identify headers."
+  (insert (propertize header
+                      'face 'jmdict-header
+                      'jmdict-header t)))
 
 (defun jmdict--insert-entry (entry)
   ;; Readings
@@ -297,7 +296,8 @@ inhibited for BODY."
           (cl-remove-if (lambda (r) (equal (cdr (assoc "reading" r))
                                            primary))
                         (cdr (assoc "Reading" entry)))))
-    (insert (propertize primary 'face 'jmdict-header) "\n")
+    (jmdict--insert-entry-header primary)
+    (insert "\n")
     (dolist (kanji kanji-readings)
       (insert (propertize (cdr (assoc "reading" kanji))
                           'face 'jmdict-kanji))
@@ -349,6 +349,68 @@ inhibited for BODY."
     (dolist (gloss (cdr (assoc "Gloss" sense)))
       (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
     (insert "\n")))
+
+(defmacro jmdict--with-jmdict-buffer (buffer &rest body)
+  "Evaluate BODY with the JMDict buffer as the current buffer.
+BUFFER will be bound to the buffer in BODY. The JMDict buffer
+will be placed in `jmdict-mode' and read-only mode will be
+inhibited for BODY."
+  (declare (indent 1))
+  `(let ((,buffer (get-buffer-create jmdict--buffer-name)))
+     (with-current-buffer ,buffer
+       (jmdict-mode)
+       (let ((inhibit-read-only t))
+         ,@body))))
+
+;; Interactive commands
+
+(defun jmdict--move-beginning-of-header ()
+  "Move to the beginning of the header under point.
+If point is not on a header, do nothing."
+  (when (get-text-property (1- (point)) 'jmdict-header)
+    (goto-char (or (previous-single-property-change (point) 'jmdict-header)
+                   (point-min)))))
+
+(defun jmdict--move-end-of-header ()
+  "Move to the end of the header under point.
+If point is not on a header, do nothing."
+  (when (get-text-property (point) 'jmdict-header)
+    (when-let ((end (next-single-property-change (point) 'jmdict-header)))
+      (goto-char end))))
+
+(defun jmdict-next-entry (arg)
+  "Navigate ARG entries forward.
+Also recenter the window so that the entry header is at the top
+of the window."
+  (interactive "p")
+  (when (cl-minusp arg)
+    (jmdict-previous-entry (- arg)))
+  (cl-loop repeat arg
+           do (jmdict--move-end-of-header)
+           (when-let ((end
+                       (next-single-property-change (point)
+                                                    'jmdict-header)))
+             (goto-char end))
+           (jmdict--move-beginning-of-header))
+  (recenter 0))
+
+(defun jmdict-previous-entry (arg)
+  "Navigate ARG entries backwards.
+Also recenter the window so that the entry header is at the top
+of the window."
+  (interactive "p")
+  (when (cl-minusp arg)
+    (jmdict-next-entry (- arg)))
+  (cl-loop repeat arg
+           do (jmdict--move-beginning-of-header)
+           (when-let ((end
+                       (previous-single-property-change (point)
+                                                        'jmdict-header)))
+             (goto-char end))
+           (jmdict--move-beginning-of-header))
+  (recenter 0))
+
+;; Main function and mode
 
 (defun jmdict (word)
   (interactive "sWord: ")
