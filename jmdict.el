@@ -361,7 +361,7 @@ inhibited for BODY."
       (dolist (entry entries)
         (jmdict--insert-entry entry)
         (insert "\n"))
-      (beginning-of-buffer)
+      (goto-char (point-min))
       (set-buffer-modified-p nil)
       (display-buffer buffer))))
 
