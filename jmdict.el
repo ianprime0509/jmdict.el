@@ -60,6 +60,44 @@
   "Face for JMDict kana readings."
   :group 'jmdict)
 
+;; Utility macros
+
+(defmacro jmdict--defun-cached (name arglist
+                                     &optional docstring decl
+                                     &rest body)
+  "Define a function that caches its results.
+Behave exactly like `defun', but also define a cache `NAME-cache'
+and check the cache for the function's arguments to potentially
+avoid a call to the underlying function."
+  (declare (doc-string 3) (indent 2))
+  ;; Normalize body forms
+  (unless (eql 'declare (car-safe decl))
+    (push decl body)
+    (setf decl nil))
+  (unless (stringp docstring)
+    (push docstring body)
+    (setf docstring nil))
+  (let ((cache-var (intern (concat (symbol-name name) "-cache")))
+        (cache-doc (format "Cache for %s." name))
+        (arguments (cl-remove-if (lambda (arg)
+                                   (or (eql '&optional arg)
+                                       (eql '&rest arg)))
+                                 arglist))
+        (cached (gensym)))
+    `(progn
+       (defvar ,cache-var (make-ring 20) ,cache-doc)
+       (defun ,name ,arglist
+         ,docstring
+         ,decl
+         (if-let ((,cached
+                   (cdr (assoc (list ,@arguments)
+                               (ring-elements ,cache-var)))))
+             ,cached
+           (let ((,cached (progn ,@body)))
+             (ring-insert ,cache-var
+                          (cons (list ,@arguments) ,cached))
+             ,cached))))))
+
 ;; SQLite integration
 
 (defun jmdict--query (db spec where)
@@ -231,7 +269,7 @@ PARENT is the name of the parent table, or nil if there is none."
           (setf columns (nconc columns sub-columns))))
       (cl-values tables columns))))
 
-(defun jmdict--get-entries (ids)
+(jmdict--defun-cached jmdict--get-entries (ids)
   "Find all JMdict entries with IDs in IDS."
   (jmdict--query
    jmdict-jmdict-path
@@ -252,46 +290,47 @@ PARENT is the name of the parent table, or nil if there is none."
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
          (= "Gloss.language" "'eng'"))))
 
-(defvar jmdict--search-cache (make-ring 20)
-  "A cache for JMDict entry search results.")
-
-(defun jmdict--search-entries (query)
+(jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
-  (let ((query (downcase query)))
-    (if-let ((cached (cdr (assoc query
-                                 (ring-elements jmdict--search-cache)))))
-        cached
-      (let* ((query-string (esqlite-format-text query))
-             (kanji-results
-              (jmdict--query
-               jmdict-jmdict-path
-               '("Entry" nil ("id")
-                 ("Kanji" "entry_id" ()))
-               `(= "Kanji.reading" ,query-string)))
-             (kana-results
-              (jmdict--query
-               jmdict-jmdict-path
-               '("Entry" nil ("id")
-                 ("Reading" "entry_id" ()))
-               `(= "Reading.reading" ,query-string)))
-             (gloss-results
-              (jmdict--query
-               jmdict-jmdict-path
-               '("Entry" nil ("id")
-                 ("Sense" "entry_id" ()
-                  ("Gloss" "sense_id" ())))
-               `(and (= "lower(Gloss.gloss)" ,query-string)
-                     (= "Gloss.language" "'eng'"))))
-             (all-results
-              (append kanji-results kana-results gloss-results))
-             (ids (mapcar (lambda (entry)
-                            (cdr (assoc "id" entry)))
-                          all-results)))
-        (ring-insert jmdict--search-cache (cons query ids))
-        ids))))
+  (let* ((is-japanese (jmdict--is-japanese query))
+         (query-string (esqlite-format-text query))
+         (kanji-results
+          (when is-japanese
+            (jmdict--query
+             jmdict-jmdict-path
+             '("Entry" nil ("id")
+               ("Kanji" "entry_id" ()))
+             `(= "Kanji.reading" ,query-string))))
+         (kana-results
+          (when is-japanese
+            (jmdict--query
+             jmdict-jmdict-path
+             '("Entry" nil ("id")
+               ("Reading" "entry_id" ()))
+             `(= "Reading.reading" ,query-string))))
+         (gloss-results
+          (unless is-japanese
+            (jmdict--query
+             jmdict-jmdict-path
+             '("Entry" nil ("id")
+               ("Sense" "entry_id" ()
+                ("Gloss" "sense_id" ())))
+             `(and (= "lower(Gloss.gloss)" ,query-string)
+                   (= "Gloss.language" "'eng'")))))
+         (all-results
+          (append kanji-results kana-results gloss-results)))
+    (seq-uniq (mapcar (lambda (entry)
+                        (cdr (assoc "id" entry)))
+                      all-results))))
 
-;; JMDict entry utility functions
+;; Utility functions
+
+(defun jmdict--is-japanese (query)
+  "Return non-nil if QUERY is Japanese text."
+  (cl-loop for char across query
+           thereis (seq-contains '(kana han cjk-misc)
+                                 (aref char-script-table char))))
 
 (defun jmdict--primary-reading (entry)
   "Return the primary reading for ENTRY.
