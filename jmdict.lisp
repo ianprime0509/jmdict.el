@@ -141,7 +141,8 @@
                 :indexed t
                 :constraints (:not-null))
        ("language" "TEXT NOT NULL" (:or (xml:|lang|) "eng")
-                   :comment "The three-letter language code of the gloss")
+                   :comment "The three-letter language code of the gloss"
+                   :indexed t)
        ("gender" "TEXT" (:|g_gend|)
                  :comment "The gender of the gloss")
        ("type" "TEXT" (:|g_type|)
