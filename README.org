@@ -1,0 +1,35 @@
+#+TITLE: jmdict.el
+
+This is an Emacs interface to JMDict and related projects, serving as
+an offline Japanese dictionary.
+
+* Preparing the data
+
+** Prerequisite downloads
+
+To use jmdict.el, you need to download the prerequisite data files and
+convert them to SQLite databases (allowing near-instant queries). The
+source files are not included in this repository, but can be
+downloaded from the following locations:
+
+- JMDict :: http://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project
+            (download http://ftp.monash.edu/pub/nihongo/JMdict.gz)
+- Kanjidic :: http://www.edrdg.org/wiki/index.php/KANJIDIC_Project
+              (download
+              http://www.edrdg.org/kanjidic/kanjidic2.xml.gz)
+- Tatoeba :: https://tatoeba.org/eng/downloads (download
+             http://downloads.tatoeba.org/exports/sentences.tar.bz2)
+
+** Making the database
+
+TODO: explain how to get Common Lisp set up (Quicklisp, etc.) and fill
+this in
+
+Basically, you need to load the ~jmdict~ Lisp package defined in this
+directory and use the ~convert-xml-to-sqlite~ function to convert the
+JMDict and Kanjidic files:
+
+#+BEGIN_SRC lisp
+(convert-xml-to-sqlite "path/to/jmdict.xml" "jmdict.sqlite3" *jmdict-structure*)
+(convert-xml-to-sqlite "path/to/kanjidic2.xml" "kanjidic.sqlite3" *kanjidic-structure*)
+#+END_SRC
