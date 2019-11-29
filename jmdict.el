@@ -1,3 +1,4 @@
+;;; -*- lexical-binding: t; -*-
 ;;; jmdict.el --- JMDict and Kanjidic interface for Emacs
 
 ;; Copyright 2019 Ian Johnson
@@ -37,10 +38,12 @@
   :group 'applications)
 
 (defcustom jmdict-jmdict-path
-  "jmdict.sqlite3"
+  (expand-file-name "~/jmdict/jmdict.sqlite3")
   "Path to the JMDict SQLite database."
   :group 'jmdict
-  :type 'file)
+  :type 'file
+  :set (lambda (symbol path)
+         (set-default symbol (expand-file-name path))))
 
 (defface jmdict-header
   '((t . (:height 2.0 :weight bold)))
@@ -111,7 +114,7 @@ top-level table and SUB-SPECS are the sub-tables to process."
     ;; Populate the initial parsed alist with the column values
     ;; of the first row
     (cl-mapcar (lambda (column value)
-                 (setq parsed (cl-acons column value parsed)))
+                 (setf parsed (cl-acons column value parsed)))
                ;; We use rest below to ignore the initial (implicit)
                ;; ID column
                columns (cl-rest (first rows)))
@@ -122,7 +125,7 @@ top-level table and SUB-SPECS are the sub-tables to process."
                            rows))
              (sub-value (jmdict--parse-rows rows sub-spec)))
         (cl-incf consumed (jmdict--n-columns sub-spec))
-        (setq parsed (cl-acons (first sub-spec) sub-value parsed))))
+        (setf parsed (cl-acons (first sub-spec) sub-value parsed))))
     parsed))
 
 (defun jmdict--n-columns (spec)
@@ -213,8 +216,8 @@ PARENT is the name of the parent table, or nil if there is none."
       (dolist (sub-spec sub-specs)
         (cl-multiple-value-bind (sub-tables sub-columns)
             (jmdict--parse-query-spec sub-spec table)
-          (setq tables (nconc tables sub-tables))
-          (setq columns (nconc columns sub-columns))))
+          (setf tables (nconc tables sub-tables))
+          (setf columns (nconc columns sub-columns))))
       (cl-values tables columns))))
 
 (defun jmdict--get-entries (ids)
@@ -364,7 +367,7 @@ inhibited for BODY."
   (declare (indent 1))
   `(let ((,buffer (get-buffer jmdict--buffer-name)))
      (unless ,buffer
-       (setq ,buffer (get-buffer-create jmdict--buffer-name))
+       (setf ,buffer (get-buffer-create jmdict--buffer-name))
        (with-current-buffer ,buffer
          (jmdict-mode)))
      (with-current-buffer ,buffer
@@ -394,7 +397,7 @@ is the position of point.")
 Each element on the stack is of the same form as
 `jmdict--history-back-stack'.")
 
-(defvar-local jmdict--query nil
+(defvar-local jmdict--current-query nil
   "The query associated with the current buffer.")
 
 (defun jmdict--display-query-result (query)
@@ -430,9 +433,10 @@ If point is not on a header, do nothing."
   (interactive)
   (if-let ((back (pop jmdict--history-back-stack)))
       (progn
-        (when jmdict--query
-          (push (cons jmdict--query (point)) jmdict--history-forward-stack))
-        (setq jmdict--query (car back))
+        (when jmdict--current-query
+          (push (cons jmdict--current-query (point))
+                jmdict--history-forward-stack))
+        (setf jmdict--current-query (car back))
         (jmdict--display-query-result (car back))
         (goto-char (cdr back))
         (recenter))
@@ -444,9 +448,10 @@ This undoes the action of `jmdict-go-back'."
   (interactive)
   (if-let ((forward (pop jmdict--history-forward-stack)))
       (progn
-        (when jmdict--query
-          (push (cons jmdict--query (point)) jmdict--history-back-stack))
-        (setq jmdict--query (car forward))
+        (when jmdict--current-query
+          (push (cons jmdict--current-query (point))
+                jmdict--history-back-stack))
+        (setf jmdict--current-query (car forward))
         (jmdict--display-query-result (car forward))
         (goto-char (cdr forward))
         (recenter))
@@ -490,10 +495,11 @@ of the window."
   "Query JMDict for QUERY and display the results."
   (interactive "sQuery: ")
   (jmdict--with-jmdict-buffer buffer
-    (when jmdict--query
-      (push (cons jmdict--query (point)) jmdict--history-back-stack))
-    (setq jmdict--history-forward-stack ())
-    (setq jmdict--query query)
+    (when jmdict--current-query
+      (push (cons jmdict--current-query (point))
+            jmdict--history-back-stack))
+    (setf jmdict--history-forward-stack ())
+    (setf jmdict--current-query query)
     (jmdict--display-query-result query)
     (display-buffer buffer)))
 
