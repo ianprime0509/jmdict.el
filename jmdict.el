@@ -417,7 +417,8 @@ history stacks as appropriate."
 (defun jmdict--move-beginning-of-header ()
   "Move to the beginning of the header under point.
 If point is not on a header, do nothing."
-  (when (get-text-property (1- (point)) 'jmdict-header)
+  (when (or (eql (point-min) (point))
+            (get-text-property (1- (point)) 'jmdict-header))
     (goto-char (or (previous-single-property-change (point) 'jmdict-header)
                    (point-min)))))
 
