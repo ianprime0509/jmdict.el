@@ -75,7 +75,9 @@ PARENT-ID COLUMNS &rest SUB-STRUCTURES).
 TABLE is the table from which to select COLUMNS. Every table is
 assumed to have a primary key column named id. PARENT-ID is the
 column in the child table referencing the primary key of the
-parent (ignored at the top level).
+parent (ignored at the top level). The first element of COLUMNS
+may be :optional to indicate that a left join should be used
+instead of an inner join, if applicable.
 
 SUB-STRUCTURES is a list of structures in child tables to join
 with the parent.
@@ -100,6 +102,8 @@ The return value is in the same format as `jmdict--query'."
   (cl-destructuring-bind (table parent-id columns &rest sub-specs)
       spec
     (declare (ignore table parent-id))
+    ;; Ignore keyword options in columns
+    (setf columns (cl-remove-if #'keywordp columns))
     (let ((grouped-rows (jmdict--group-by-id rows)))
       (mapcar (lambda (group)
                 (jmdict--structure-rows (cdr group) columns sub-specs))
@@ -165,8 +169,9 @@ SPEC and WHERE are as described in `jmdict--query'."
                            columns))
           (first-table (first (first tables)))
           (rest-tables
-           (cl-loop for (table join-on) in (cl-rest tables)
-                    collect (format "LEFT JOIN %s ON %s"
+           (cl-loop for (table join-on optional) in (cl-rest tables)
+                    collect (format "%s %s ON %s"
+                                    (if optional "LEFT JOIN" "JOIN")
                                     table
                                     join-on)))
           (id-columns (mapcar (lambda (table)
@@ -204,8 +209,8 @@ multiple applications of a binary operator from left to right."
 (defun jmdict--parse-query-spec (spec parent)
   "Parse SPEC and return a list of tables and columns.
 The returned list is of the form (TABLES COLUMNS), where each
-element in TABLES is of the form (NAME JOIN-ON) and each element
-in columns is of the form (TABLE COLUMN).
+element in TABLES is of the form (NAME JOIN-ON OPTIONAL) and each
+element in columns is of the form (TABLE COLUMN).
 
 PARENT is the name of the parent table, or nil if there is none."
   (cl-destructuring-bind (table parent-id columns &rest sub-specs)
@@ -213,11 +218,12 @@ PARENT is the name of the parent table, or nil if there is none."
     (let ((tables
            (list (list table
                        (when parent
-                         (format "%s.%s = %s.id" table parent-id parent)))))
+                         (format "%s.%s = %s.id" table parent-id parent))
+                       (eql :optional (first columns)))))
           (columns
            (nconc (list (list table "id"))
                   (mapcar (lambda (column) (list table column))
-                          columns))))
+                          (cl-remove-if #'keywordp columns)))))
       (dolist (sub-spec sub-specs)
         (cl-multiple-value-bind (sub-tables sub-columns)
             (jmdict--parse-query-spec sub-spec table)
@@ -230,18 +236,18 @@ PARENT is the name of the parent table, or nil if there is none."
   (jmdict--query
    jmdict-jmdict-path
    '("Entry" nil ()
-     ("Kanji" "entry_id" ("reading")
-      ("KanjiInfo" "kanji_id" ("info")))
+     ("Kanji" "entry_id" (:optional "reading")
+      ("KanjiInfo" "kanji_id" (:optional "info")))
      ("Reading" "entry_id" ("reading")
-      ("ReadingRestriction" "reading_id" ("restriction"))
-      ("ReadingInfo" "reading_id" ("info")))
+      ("ReadingRestriction" "reading_id" (:optional "restriction"))
+      ("ReadingInfo" "reading_id" (:optional "info")))
      ("Sense" "entry_id" ()
-      ("SenseKanjiRestriction" "sense_id" ("restriction"))
-      ("SenseKanaRestriction" "sense_id" ("restriction"))
-      ("SenseCrossReference" "sense_id" ("target"))
-      ("SenseAntonym" "sense_id" ("target"))
-      ("SensePartOfSpeech" "sense_id" ("part_of_speech"))
-      ("SenseField" "sense_id" ("field"))
+      ("SenseKanjiRestriction" "sense_id" (:optional "restriction"))
+      ("SenseKanaRestriction" "sense_id" (:optional "restriction"))
+      ("SenseCrossReference" "sense_id" (:optional "target"))
+      ("SenseAntonym" "sense_id" (:optional "target"))
+      ("SensePartOfSpeech" "sense_id" (:optional "part_of_speech"))
+      ("SenseField" "sense_id" (:optional "field"))
       ("Gloss" "sense_id" ("gloss" "type"))))
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
          (= "Gloss.language" "'eng'"))))
@@ -257,21 +263,31 @@ The return value is a list of entry IDs."
                                  (ring-elements jmdict--search-cache)))))
         cached
       (let* ((query-string (esqlite-format-text query))
-             (query-results
+             (kanji-results
               (jmdict--query
                jmdict-jmdict-path
                '("Entry" nil ("id")
-                 ("Kanji" "entry_id" ())
-                 ("Reading" "entry_id" ())
+                 ("Kanji" "entry_id" ()))
+               `(= "Kanji.reading" ,query-string)))
+             (kana-results
+              (jmdict--query
+               jmdict-jmdict-path
+               '("Entry" nil ("id")
+                 ("Reading" "entry_id" ()))
+               `(= "Reading.reading" ,query-string)))
+             (gloss-results
+              (jmdict--query
+               jmdict-jmdict-path
+               '("Entry" nil ("id")
                  ("Sense" "entry_id" ()
                   ("Gloss" "sense_id" ())))
-               `(or (= "Kanji.reading" ,query-string)
-                    (= "Reading.reading" ,query-string)
-                    (and (= "lower(Gloss.gloss)" ,query-string)
-                         (= "Gloss.language" "'eng'")))))
+               `(and (= "lower(Gloss.gloss)" ,query-string)
+                     (= "Gloss.language" "'eng'"))))
+             (all-results
+              (append kanji-results kana-results gloss-results))
              (ids (mapcar (lambda (entry)
                             (cdr (assoc "id" entry)))
-                          query-results)))
+                          all-results)))
         (ring-insert jmdict--search-cache (cons query ids))
         ids))))
 
