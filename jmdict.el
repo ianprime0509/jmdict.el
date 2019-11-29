@@ -246,25 +246,34 @@ PARENT is the name of the parent table, or nil if there is none."
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
          (= "Gloss.language" "'eng'"))))
 
+(defvar jmdict--search-cache (make-ring 20)
+  "A cache for JMDict entry search results.")
+
 (defun jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
-  (let* ((query-string (esqlite-format-text (downcase query)))
-         (query-results
-          (jmdict--query
-           jmdict-jmdict-path
-           '("Entry" nil ("id")
-             ("Kanji" "entry_id" ())
-             ("Reading" "entry_id" ())
-             ("Sense" "entry_id" ()
-              ("Gloss" "sense_id" ())))
-           `(or (= "Kanji.reading" ,query-string)
-                (= "Reading.reading" ,query-string)
-                (and (= "lower(Gloss.gloss)" ,query-string)
-                     (= "Gloss.language" "'eng'"))))))
-    (mapcar (lambda (entry)
-              (cdr (assoc "id" entry)))
-            query-results)))
+  (let ((query (downcase query)))
+    (if-let ((cached (cdr (assoc query
+                                 (ring-elements jmdict--search-cache)))))
+        cached
+      (let* ((query-string (esqlite-format-text query))
+             (query-results
+              (jmdict--query
+               jmdict-jmdict-path
+               '("Entry" nil ("id")
+                 ("Kanji" "entry_id" ())
+                 ("Reading" "entry_id" ())
+                 ("Sense" "entry_id" ()
+                  ("Gloss" "sense_id" ())))
+               `(or (= "Kanji.reading" ,query-string)
+                    (= "Reading.reading" ,query-string)
+                    (and (= "lower(Gloss.gloss)" ,query-string)
+                         (= "Gloss.language" "'eng'")))))
+             (ids (mapcar (lambda (entry)
+                            (cdr (assoc "id" entry)))
+                          query-results)))
+        (ring-insert jmdict--search-cache (cons query ids))
+        ids))))
 
 ;; JMDict entry utility functions
 
