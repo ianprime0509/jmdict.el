@@ -182,10 +182,13 @@ SPEC and WHERE are as described in `jmdict--query'."
 (defun jmdict--convert-sql-expression (expr)
   "Convert EXPR to a SQL expression.
 EXPR is just a normal SQL expression, but written in s-expression
-format."
+format. Unary and binary operators are converted in the natural
+way; expressions with more than two operands are converted to
+multiple applications of a binary operator from left to right."
   (if (not (listp expr)) (format "%s" expr)
     (cl-destructuring-bind (op &rest operands) expr
       (case (length operands)
+        (0 (error "No operands provided"))
         (1 (format "(%s %s)"
                    op
                    (jmdict--convert-sql-expression (first operands))))
@@ -193,8 +196,10 @@ format."
                    (jmdict--convert-sql-expression (first operands))
                    op
                    (jmdict--convert-sql-expression (second operands))))
-        (t (error "Expressions with %d operands are not supported"
-                  (length operands)))))))
+        (t (cl-destructuring-bind (op first second &rest rest) expr
+             (jmdict--convert-sql-expression (list* op
+                                                    (list op first second)
+                                                    rest))))))))
 
 (defun jmdict--parse-query-spec (spec parent)
   "Parse SPEC and return a list of tables and columns.
@@ -244,15 +249,19 @@ PARENT is the name of the parent table, or nil if there is none."
 (defun jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
-  (let* ((query-string (esqlite-format-text query))
+  (let* ((query-string (esqlite-format-text (downcase query)))
          (query-results
           (jmdict--query
            jmdict-jmdict-path
            '("Entry" nil ("id")
              ("Kanji" "entry_id" ())
-             ("Reading" "entry_id" ()))
+             ("Reading" "entry_id" ())
+             ("Sense" "entry_id" ()
+              ("Gloss" "sense_id" ())))
            `(or (= "Kanji.reading" ,query-string)
-                (= "Reading.reading" ,query-string)))))
+                (= "Reading.reading" ,query-string)
+                (and (= "lower(Gloss.gloss)" ,query-string)
+                     (= "Gloss.language" "'eng'"))))))
     (mapcar (lambda (entry)
               (cdr (assoc "id" entry)))
             query-results)))
