@@ -316,7 +316,7 @@ The return value is a list of entry IDs."
              '("Entry" nil ("id")
                ("Sense" "entry_id" ()
                 ("Gloss" "sense_id" ())))
-             `(and (= "lower(Gloss.gloss)" ,query-string)
+             `(and (like "Gloss.gloss" ,query-string)
                    (= "Gloss.language" "'eng'")))))
          (all-results
           (append kanji-results kana-results gloss-results)))

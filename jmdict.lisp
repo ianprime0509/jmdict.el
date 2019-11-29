@@ -33,7 +33,7 @@
      ("Kanji"
       ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
                   :indexed t)
-      ("reading" "TEXT NOT NULL" (:|keb| :text)
+      ("reading" "TEXT NOT NULL COLLATE NOCASE" (:|keb| :text)
                  :comment "Reading in kanji or other non-kana characters"
                  :indexed t))
      (:|ke_inf|
@@ -52,7 +52,7 @@
      ("Reading"
       ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
                   :indexed t)
-      ("reading" "TEXT NOT NULL" (:|reb| :text)
+      ("reading" "TEXT NOT NULL COLLATE NOCASE" (:|reb| :text)
                  :comment "Reading in kana"
                  :indexed t)
       ("re_nokanji" "INTEGER NOT NULL" (:if (:|re_nokanji|) 1 0)
@@ -137,7 +137,8 @@
                    :indexed t)
        ;; Note: the JMDict entry for 畜生 actually has a gloss element
        ;; with no contents (which, interestingly, is in Spanish)
-       ("gloss" "TEXT NOT NULL" (:text) :indexed t
+       ("gloss" "TEXT NOT NULL COLLATE NOCASE" (:text)
+                :indexed t
                 :constraints (:not-null))
        ("language" "TEXT NOT NULL" (:or (xml:|lang|) "eng")
                    :comment "The three-letter language code of the gloss")
@@ -178,7 +179,8 @@ Note: only one top-level element is supported (or needed).")
 (defparameter *kanjidic-structure*
   '(:|character|
     ("Character"
-     ("literal" "TEXT NOT NULL" (:|literal| :text) :indexed t)
+     ("literal" "TEXT NOT NULL COLLATE NOCASE" (:|literal| :text)
+      :indexed t)
      ("grade" "INTEGER" (:|misc| :|grade| :text))
      ("stroke_count" "INTEGER" (:|misc| :|stroke_count| :text))
      ("frequency" "INTEGER" (:|misc| :|freq| :text)
@@ -227,7 +229,7 @@ Note: only one top-level element is supported (or needed).")
       ("Reading"
        ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
                                    :indexed t)
-       ("reading" "TEXT NOT NULL" (:text) :indexed t)
+       ("reading" "TEXT NOT NULL COLLATE NOCASE" (:text) :indexed t)
        ("type" "TEXT NOT NULL" (:|r_type|))
        ("on_type" "TEXT" (:|on_type|))
        ("approved" "TEXT" (:|r_status|))))
@@ -235,7 +237,8 @@ Note: only one top-level element is supported (or needed).")
       ("Meaning"
        ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
                                    :indexed t)
-       ("meaning" "TEXT NOT NULL" (:text) :indexed t)
+       ("meaning" "TEXT NOT NULL COLLATE NOCASE" (:text)
+                  :indexed t)
        ("language" "TEXT NOT NULL" (:or (:|m_lang|) "en")
                    :comment "The two-letter language code of the meaning"))))
     ((:|reading_meaning| :|nanori|)
