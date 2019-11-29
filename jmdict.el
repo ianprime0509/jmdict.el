@@ -275,10 +275,12 @@ PARENT is the name of the parent table, or nil if there is none."
    jmdict-jmdict-path
    '("Entry" nil ()
      ("Kanji" "entry_id" (:optional "reading")
-      ("KanjiInfo" "kanji_id" (:optional "info")))
+      ("KanjiInfo" "kanji_id" (:optional "info"))
+      ("KanjiPriority" "kanji_id" (:optional "priority")))
      ("Reading" "entry_id" ("reading")
       ("ReadingRestriction" "reading_id" (:optional "restriction"))
-      ("ReadingInfo" "reading_id" (:optional "info")))
+      ("ReadingInfo" "reading_id" (:optional "info"))
+      ("ReadingPriority" "reading_id" (:optional "priority")))
      ("Sense" "entry_id" ()
       ("SenseKanjiRestriction" "sense_id" (:optional "restriction"))
       ("SenseKanaRestriction" "sense_id" (:optional "restriction"))
@@ -286,7 +288,11 @@ PARENT is the name of the parent table, or nil if there is none."
       ("SenseAntonym" "sense_id" (:optional "target"))
       ("SensePartOfSpeech" "sense_id" (:optional "part_of_speech"))
       ("SenseField" "sense_id" (:optional "field"))
-      ("Gloss" "sense_id" ("gloss" "type"))))
+      ("SenseMisc" "sense_id" (:optional "info"))
+      ("SenseSource" "sense_id" (:optional "word" "language"))
+      ("SenseDialect" "sense_id" (:optional "dialect"))
+      ("Gloss" "sense_id" ("gloss" "type"))
+      ("SenseInfo" "sense_id" (:optional "info"))))
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
          (= "Gloss.language" "'eng'"))))
 
@@ -339,6 +345,30 @@ or the first kana reading."
   (or (cdr (assoc "reading" (first (cdr (assoc "Kanji" entry)))))
       (cdr (assoc "reading" (first (cdr (assoc "Reading" entry)))))))
 
+(defun jmdict--values (path alist &optional multiple)
+  "Extract a list of the values at PATH in ALIST.
+If PATH is a single value, behave as `alist-get' with `equal' as
+the test function but return a list rather than a single value.
+If PATH is a list, follow the components of PATH sequentially in
+the same fashion.
+
+If MULTIPLE is non-nil, treat ALIST as a list of alists and
+return a list of all values found."
+  (if (listp path)
+      (if (cl-endp path)
+          alist
+        (jmdict--values (cl-rest path)
+                        (jmdict--values (first path) alist multiple)
+                        t))
+    (if multiple
+        (apply #'append
+               (mapcar
+                (lambda (alist)
+                  (let ((value (cdr (assoc path alist))))
+                    (if (listp value) value (list value))))
+                alist))
+      (jmdict--values path (list alist) t))))
+
 ;; JMDict buffer display
 
 (defvar jmdict--buffer-name "*Jmdict*")
@@ -368,6 +398,7 @@ make it easier to identify headers."
                       'jmdict-header t)))
 
 (defun jmdict--insert-entry (entry)
+  "Insert ENTRY into the current buffer."
   ;; Readings
   (let* ((primary (jmdict--primary-reading entry))
          (kanji-readings
@@ -383,52 +414,66 @@ make it easier to identify headers."
     (dolist (kanji kanji-readings)
       (insert (propertize (cdr (assoc "reading" kanji))
                           'face 'jmdict-kanji))
-      (when-let ((info (mapcar (lambda (i)
-                                 (cdr (assoc "info" i)))
-                               (cdr (assoc "KanjiInfo" kanji)))))
+      (when-let ((info (jmdict--values '("KanjiInfo" "info") kanji)))
         (insert " (" (string-join info ", ") ")"))
       (insert "\n"))
     (dolist (kana kana-readings)
       (insert (propertize (cdr (assoc "reading" kana))
                           'face 'jmdict-kana))
-      (when-let ((info (mapcar (lambda (i)
-                                 (cdr (assoc "info" i)))
-                               (cdr (assoc "ReadingInfo" kana))))))
+      (when-let ((info (jmdict--values '("ReadingInfo" "info") kana)))
+        (insert " (" (string-join info ", ") ")"))
       (when-let ((restrictions
-                  (mapcar (lambda (r)
-                            (cdr (assoc "restriction" r)))
-                          (cdr (assoc "ReadingRestriction" kana)))))
+                  (jmdict--values '("ReadingRestriction" "restriction") kana)))
         (insert " (applies only to " (string-join restrictions ", ") ")"))
       (insert "\n")))
   (insert "\n")
   ;; Senses
   (dolist (sense (cdr (assoc "Sense" entry)))
     (when-let ((parts-of-speech
-                (mapcar (lambda (p)
-                          (cdr (assoc "part_of_speech" p)))
-                        (cdr (assoc "SensePartOfSpeech" sense)))))
+                (jmdict--values '("SensePartOfSpeech" "part_of_speech") sense)))
       (insert (propertize (string-join parts-of-speech "\n")
                           'face 'bold)
               "\n"))
+    (when-let ((fields
+                (jmdict--values '("SenseField" "field") sense)))
+      (insert (propertize (string-join fields ", ")
+                          'face 'italic)
+              "\n"))
+    (when-let ((misc
+                (jmdict--values '("SenseMisc" "info") sense)))
+      (insert (propertize (string-join misc "\n")
+                          'face 'italic)
+              "\n"))
+    (when-let ((info
+                (jmdict--values '("SenseInfo" "info") sense)))
+      (insert (propertize (string-join info "\n")
+                          'face 'italic)
+              "\n"))
+    (when-let ((sources
+                (mapcar (lambda (s)
+                          (format "%s (%s)"
+                                  (cdr (assoc "word" s))
+                                  (cdr (assoc "language" s))))
+                        (jmdict--values "SenseSource" sense))))
+      (insert "Source language: " (string-join sources ", ")))
+    (when-let ((dialects
+                (jmdict--values '("SenseDialect" "dialect") sense)))
+      (insert "Dialects: " (string-join dialects ", ")))
     (when-let ((antonyms
-                (mapcar (lambda (a)
-                          (cdr (assoc "target" a)))
-                        (cdr (assoc "SenseAntonym" sense)))))
+                (jmdict--values '("SenseAntonym" "target") sense)))
       (insert "Antonyms: ")
       (cl-loop for ant on antonyms
                do (insert-button (first ant) 'type 'jmdict-reference)
                unless (cl-endp (cl-rest ant)) do (insert ", "))
       (insert "\n"))
     (when-let ((cross-references
-                (mapcar (lambda (c)
-                          (cdr (assoc "target" c)))
-                        (cdr (assoc "SenseCrossReference" sense)))))
+                (jmdict--values '("SenseCrossReference" "target") sense)))
       (insert "See also: ")
       (cl-loop for ref on cross-references
                do (insert-button (first ref) 'type 'jmdict-reference)
                unless (cl-endp (cl-rest ref)) do (insert ", "))
       (insert "\n"))
-    (dolist (gloss (cdr (assoc "Gloss" sense)))
+    (dolist (gloss (jmdict--values "Gloss" sense))
       (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
     (insert "\n")))
 

@@ -71,7 +71,8 @@
      (:|re_pri|
       ("ReadingPriority"
        ("reading_id" "INTEGER NOT NULL REFERENCES Reading(id)" :parent-id
-                     :comment "Indicator of relative reading priority"))))
+                     :comment "Indicator of relative reading priority")
+       ("priority" "TEXT NOT NULL" (:text)))))
     (:|sense|
      ("Sense"
       ("entry_id" "INTEGER NOT NULL REFERENCES Entry(id)" :parent-id
