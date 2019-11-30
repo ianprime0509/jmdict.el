@@ -13,12 +13,14 @@ source files are not included in this repository, but can be
 downloaded from the following locations:
 
 - JMDict :: http://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project
-            (download http://ftp.monash.edu/pub/nihongo/JMdict.gz)
+  - Downloads
+    - http://ftp.monash.edu/pub/nihongo/JMdict.gz
 - Kanjidic :: http://www.edrdg.org/wiki/index.php/KANJIDIC_Project
-              (download
-              http://www.edrdg.org/kanjidic/kanjidic2.xml.gz)
-- Tatoeba :: https://tatoeba.org/eng/downloads (download
-             http://downloads.tatoeba.org/exports/sentences.tar.bz2)
+  - Downloads
+    - http://www.edrdg.org/kanjidic/kanjidic2.xml.gz
+- Tatoeba/Tanaka Corpus :: http://www.edrdg.org/wiki/index.php/Tanaka_Corpus
+  - Downloads
+    - ftp://ftp.monash.edu/pub/nihongo/examples.utf.gz
 
 ** Making the database
 

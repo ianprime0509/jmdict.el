@@ -18,7 +18,7 @@
   :version "0.1.0"
   :author "Ian Johnson <ianprime0509@gmail.com>"
   :licence "MIT"
-  :depends-on ("cl-ppcre" "s-xml" "sqlite")
+  :depends-on ("cl-ppcre" "s-xml" "sqlite" "uiop")
   :components ((:file "packages")
                (:file "jmdict" :depends-on ("packages"))))
 

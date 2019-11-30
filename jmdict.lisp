@@ -272,8 +272,71 @@ STRUCTURE is a database structure in the format of
 *JMDICT-STRUCTURE*."
   (sqlite:with-open-database (db sqlite-path)
     (create-tables db structure)
-    (create-indexes db structure)
     (insert-values db xml-path structure)))
+
+(defun convert-tatoeba-to-sqlite (sentences-path links-path sqlite-path)
+  "Convert the Tatoeba files to a SQLite database."
+  ;; These aren't XML files, so the XML structure stuff used for
+  ;; JMDict and Kanjidic won't work
+  (sqlite:with-open-database (db sqlite-path)
+    (create-table db "Sentence"
+                  '(("id" "INTEGER PRIMARY KEY")
+                    ("lang" "TEXT NOT NULL" :indexed t)
+                    ("text" "TEXT NOT NULL" :indexed t)))
+    (sqlite:with-transaction db
+      (with-open-file (sentences sentences-path)
+        (let ((insert (prepare-non-query-statement
+                       db (make-insert-query "Sentence" 3))))
+          (loop for n from 1
+             for line = (read-line sentences nil)
+             while line
+             do (let* ((parts
+                        (uiop:split-string line :separator '(#\Tab)))
+                       (lang (second parts)))
+                  ;; Only bother with English or Japanese sentences
+                  ;; since those will be the only ones in the
+                  ;; final database
+                  (when (or (equal "eng" lang)
+                            (equal "jpn" lang))
+                    (apply insert parts)))
+             when (zerop (rem n 100000))
+             do (format *error-output*
+                        "Processed ~d sentences~%" n)))))
+    (create-table db "Link"
+                  '(("from_id" "INTEGER NOT NULL REFERENCES Sentence(id)"
+                     :indexed t)
+                    ("to_id" "INTEGER NOT NULL REFERENCES Sentence(id)"
+                     :indexed t)))
+    (sqlite:with-transaction db
+      (with-open-file (links links-path)
+        (let ((insert (prepare-non-query-statement
+                       db (make-insert-query "Link" 2))))
+          (loop for n from 1
+             for line = (read-line links nil)
+             while line
+             do (apply insert
+                       (uiop:split-string line :separator '(#\Tab)))
+             when (zerop (rem n 100000))
+             do (format *error-output*
+                        "Processed ~d links~%" n)))))
+    ;; With the above two tables in the original structure, create a
+    ;; new table with the desired structure. We will then drop the
+    ;; original tables and vacuum the database.
+    (create-table db "Example"
+                  '(("id" "INTEGER PRIMARY KEY")
+                    ("japanese" "TEXT NOT NULL COLLATE NOCASE"
+                     :indexed t)
+                    ("english" "TEXT COLLATE NOCASE"
+                     :indexed t)))
+    (sqlite:execute-non-query db "INSERT INTO Example
+SELECT NULL, jpn.text, eng.text
+FROM (SELECT id, text FROM Sentence WHERE lang = 'jpn') jpn
+LEFT JOIN Link ON jpn.id = Link.from_id
+JOIN (SELECT id, text FROM Sentence WHERE lang = 'eng') eng
+ON Link.to_id = eng.id;")
+    (sqlite:execute-non-query db "DROP TABLE Link;")
+    (sqlite:execute-non-query db "DROP TABLE Sentence;")
+    (sqlite:execute-non-query db "VACUUM;")))
 
 ;; Macros
 
@@ -307,61 +370,60 @@ elements in STRUCTURE."
 
 (defun create-tables (db structure)
   "Create the tables specified by STRUCTURE in DB, dropping them if they already exist."
-  (labels ((format-column-string (stream column &optional last)
-             (destructuring-bind (name type path &key comment &allow-other-keys)
-                 column
-               (declare (ignore path))
-               (format stream "~a ~a" name type)
-               (unless last (format stream ","))
-               (when comment (format stream " -- ~a" comment))
-               (format stream "~%")))
-           (format-table-string (stream table)
-             (destructuring-bind (name &rest columns) table
-               (format stream "CREATE TABLE ~a (~%" name)
-               ;; Every table has a primary key column
-               (format-column-string stream '("id" "INTEGER PRIMARY KEY" nil)
-                                     (endp columns))
-               (loop for rest on columns
-                  do (format-column-string stream (car rest) (endp (cdr rest))))
-               (format stream ");")))
-           (create-table (table)
-             (let ((create-statement
-                    (with-output-to-string (statement)
-                      (format-table-string statement table))))
-               (sqlite:execute-non-query db create-statement)))
-           (drop-table-if-exists (table)
-             (let ((drop-statement
-                    (format nil "DROP TABLE IF EXISTS ~a" (first table))))
-               (sqlite:execute-non-query db drop-statement))))
-    (destructuring-bind (element table &rest sub-structures) structure
-      (declare (ignore element))
-      (drop-table-if-exists table)
-      (create-table table)
-      (loop for sub-structure in sub-structures
-         do (create-tables db sub-structure)))))
+  (destructuring-bind (element (table &rest columns)
+                               &rest sub-structures)
+      structure
+    (declare (ignore element))
+    (let ((columns
+           (list*
+            (list "id" "INTEGER PRIMARY KEY")
+            (mapcar
+             (lambda (column)
+               (destructuring-bind (name type path &key comment indexed
+                                         &allow-other-keys)
+                   column
+                 (declare (ignore path))
+                 (list name type :comment comment :indexed indexed)))
+             columns))))
+      (create-table db table columns))
+    (loop for sub-structure in sub-structures
+       do (create-tables db sub-structure))))
 
-(defun create-indexes (db structure)
-  "Create the indexes specified by STRUCTURE in DB, dropping them if they exist."
-  (labels ((drop-index-if-exists (index-name)
-             (sqlite:execute-non-query
-              db (format nil "DROP INDEX IF EXISTS ~a" index-name)))
-           (create-index (table column)
-             (let ((index-name (format nil "~a_~a" table column)))
-               (drop-index-if-exists index-name)
-               (sqlite:execute-non-query
-                db (format nil "CREATE INDEX ~a ON ~a(~a)"
-                           index-name table column)))))
-    (destructuring-bind (element (table &rest columns) &rest sub-structures)
-        structure
-      (declare (ignore element))
-      (loop for column in columns
-         do (destructuring-bind (column type path
-                                        &key indexed &allow-other-keys)
-                column
-              (declare (ignore type path))
-              (when indexed (create-index table column))))
-      (loop for sub-structure in sub-structures
-         do (create-indexes db sub-structure)))))
+(defun create-table (db table columns)
+  "Create TABLE in DB with COLUMNS, dropping it if it exists.
+Also create any indexes associated with COLUMNS. COLUMNS is a list
+with elements of the form (NAME TYPE &key COMMENT INDEXED). Unlike
+CREATE-TABLES, do not add any implicit ID column to the table."
+  (sqlite:execute-non-query
+   db (format nil "DROP TABLE IF EXISTS ~a" table))
+  (let ((table-string
+         (with-output-to-string (str)
+           (format str "CREATE TABLE ~a (~%" table)
+           (loop for rest-columns on columns
+              do (destructuring-bind (name type &key comment &allow-other-keys)
+                     (first rest-columns)
+                   (format str "  ~a ~a" name type)
+                   (unless (endp (rest rest-columns))
+                     (format str ","))
+                   (when comment
+                     (format str " -- ~a" comment))
+                   (format str "~%")))
+           (format str ");"))))
+    (sqlite:execute-non-query db table-string))
+  (loop for column in columns
+     do (destructuring-bind (name type &key indexed &allow-other-keys)
+            column
+          (declare (ignore type))
+          (when indexed
+            (create-index db table name)))))
+
+(defun create-index (db table column)
+  "Create an index on COLUMN of TABLE in DB, dropping it if it exists."
+  (let ((index-name (format nil "~a_~a" table column)))
+    (sqlite:execute-non-query
+     db (format nil "DROP INDEX IF EXISTS ~a" index-name))
+    (sqlite:execute-non-query
+     db (format nil "CREATE INDEX ~a ON ~a(~a)" index-name table column))))
 
 (defun insert-values (db xml-path structure)
   "Insert the data from XML-PATH into DB following STRUCTURE."
