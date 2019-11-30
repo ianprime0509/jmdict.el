@@ -274,69 +274,63 @@ STRUCTURE is a database structure in the format of
     (create-tables db structure)
     (insert-values db xml-path structure)))
 
-(defun convert-tatoeba-to-sqlite (sentences-path links-path sqlite-path)
-  "Convert the Tatoeba files to a SQLite database."
-  ;; These aren't XML files, so the XML structure stuff used for
+(defun convert-tatoeba-to-sqlite (examples-path sqlite-path)
+  "Convert the Tatoeba/Tanaka Corpus examples file to a SQLite database."
+  ;; This isn't an XML file, so the XML structure stuff used for
   ;; JMDict and Kanjidic won't work
   (sqlite:with-open-database (db sqlite-path)
-    (create-table db "Sentence"
-                  '(("id" "INTEGER PRIMARY KEY")
-                    ("lang" "TEXT NOT NULL" :indexed t)
-                    ("text" "TEXT NOT NULL" :indexed t)))
-    (sqlite:with-transaction db
-      (with-open-file (sentences sentences-path)
-        (let ((insert (prepare-non-query-statement
-                       db (make-insert-query "Sentence" 3))))
-          (loop for n from 1
-             for line = (read-line sentences nil)
-             while line
-             do (let* ((parts
-                        (uiop:split-string line :separator '(#\Tab)))
-                       (lang (second parts)))
-                  ;; Only bother with English or Japanese sentences
-                  ;; since those will be the only ones in the
-                  ;; final database
-                  (when (or (equal "eng" lang)
-                            (equal "jpn" lang))
-                    (apply insert parts)))
-             when (zerop (rem n 100000))
-             do (format *error-output*
-                        "Processed ~d sentences~%" n)))))
-    (create-table db "Link"
-                  '(("from_id" "INTEGER NOT NULL REFERENCES Sentence(id)"
-                     :indexed t)
-                    ("to_id" "INTEGER NOT NULL REFERENCES Sentence(id)"
-                     :indexed t)))
-    (sqlite:with-transaction db
-      (with-open-file (links links-path)
-        (let ((insert (prepare-non-query-statement
-                       db (make-insert-query "Link" 2))))
-          (loop for n from 1
-             for line = (read-line links nil)
-             while line
-             do (apply insert
-                       (uiop:split-string line :separator '(#\Tab)))
-             when (zerop (rem n 100000))
-             do (format *error-output*
-                        "Processed ~d links~%" n)))))
-    ;; With the above two tables in the original structure, create a
-    ;; new table with the desired structure. We will then drop the
-    ;; original tables and vacuum the database.
     (create-table db "Example"
                   '(("id" "INTEGER PRIMARY KEY")
                     ("japanese" "TEXT NOT NULL COLLATE NOCASE"
                      :indexed t)
-                    ("english" "TEXT COLLATE NOCASE"
+                    ("english" "TEXT NOT NULL COLLATE NOCASE"
                      :indexed t)))
-    (sqlite:execute-non-query db "INSERT INTO Example
-SELECT NULL, jpn.text, eng.text
-FROM (SELECT id, text FROM Sentence WHERE lang = 'jpn') jpn
-LEFT JOIN Link ON jpn.id = Link.from_id
-JOIN (SELECT id, text FROM Sentence WHERE lang = 'eng') eng
-ON Link.to_id = eng.id;")
-    (sqlite:execute-non-query db "DROP TABLE Link;")
-    (sqlite:execute-non-query db "DROP TABLE Sentence;")
-    (sqlite:execute-non-query db "VACUUM;")))
+    (create-table db "Annotation"
+                  '(("id" "INTEGER PRIMARY KEY")
+                    ("example_id" "INTEGER NOT NULL REFERENCES Example(id)"
+                     :indexed t)
+                    ("word" "TEXT NOT NULL"
+                     :comment "The word as it appears in JMDict")
+                    ("reading" "TEXT"
+                     :comment "The word's reading in hiragana as it appears in JMDict")
+                    ("sense" "INTEGER"
+                     :comment "A sense number in JMDict")
+                    ("sentence_form" "TEXT"
+                     :comment "The form of the word in the sentence")
+                    ("checked" "INTEGER NOT NULL"
+                     :comment "Whether this is a 'good' and checked example of the word")))
+    (sqlite:with-transaction db
+      (with-open-file (examples examples-path)
+        (loop with a-line-scanner = (ppcre:create-scanner
+                                     "^A: ([^\\t]+)\\t([^#]+)")
+           and b-line-scanner = (ppcre:create-scanner
+                                 "^B: (.*)$")
+           and annotation-scanner = (ppcre:create-scanner
+                                     "^([^\\[\\(\\{~]+)(?:\\(([^\\)]+)\\))?(?:\\[([^\\]]+)\\])?(?:\\{([^\\}]+)\\})?(~)?$")
+           and insert-example = (prepare-non-query-statement
+                                 db (make-insert-query "Example" 3))
+           and insert-annotation = (prepare-non-query-statement
+                                    db (make-insert-query "Annotation" 7))
+           for n from 1
+           for a-line = (read-line examples nil)
+           for b-line = (read-line examples nil)
+           while (and a-line b-line)
+           do (ppcre:register-groups-bind (japanese english)
+                  (a-line-scanner a-line)
+                (funcall insert-example n japanese english)
+                (ppcre:register-groups-bind (annotations)
+                    (b-line-scanner b-line)
+                  (loop for annotation in (uiop:split-string
+                                           annotations :separator '(#\Space))
+                     do (ppcre:register-groups-bind
+                            (word reading sense sentence-form checked)
+                            (annotation-scanner annotation)
+                          (funcall insert-annotation
+                                   nil n
+                                   word reading sense sentence-form
+                                   (if checked 1 0))))))
+           when (= (rem n 10000) 0)
+           do (format *error-output* "Processed ~d entries~%" n))))))
 
 ;; Macros
 

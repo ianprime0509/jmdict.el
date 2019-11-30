@@ -34,4 +34,5 @@ JMDict and Kanjidic files:
 #+BEGIN_SRC lisp
 (convert-xml-to-sqlite "path/to/jmdict.xml" "jmdict.sqlite3" *jmdict-structure*)
 (convert-xml-to-sqlite "path/to/kanjidic2.xml" "kanjidic.sqlite3" *kanjidic-structure*)
+(convert-tatoeba-to-sqlite "path/to/examples.utf" "tatoeba.sqlite3")
 #+END_SRC
