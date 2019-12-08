@@ -37,27 +37,40 @@
   :prefix "jmdict-"
   :group 'applications)
 
+(defun jmdict--set-default-path (symbol path)
+  "Set the default value of SYMBOL to PATH.
+PATH is expanded using `expand-file-name'."
+  (set-default symbol (expand-file-name path)))
+
 (defcustom jmdict-jmdict-path
   (expand-file-name "~/jmdict/jmdict.sqlite3")
   "Path to the JMDict SQLite database."
   :group 'jmdict
   :type 'file
-  :set (lambda (symbol path)
-         (set-default symbol (expand-file-name path))))
+  :set #'jmdict--set-default-path)
+
+(defcustom jmdict-kanjidic-path
+  (expand-file-name "~/jmdict/kanjidic.sqlite3")
+  "Path to the Kanjidic SQLite database."
+  :group 'jmdict
+  :type 'file
+  :set #'jmdict--set-default-path)
+
+(defcustom jmdict-tatoeba-path
+  (expand-file-name "~/jmdict/tatoeba.sqlite3")
+  "Path to the Tatoeba SQLite database."
+  :group 'jmdict
+  :type 'file
+  :set #'jmdict--set-default-path)
 
 (defface jmdict-header
   '((t . (:height 2.0 :weight bold)))
   "Face for JMDict entry headers."
   :group 'jmdict)
 
-(defface jmdict-kanji
+(defface jmdict-sub-header
   '((t . (:height 1.5 :weight bold)))
-  "Face for JMDict non-primary kanji."
-  :group 'jmdict)
-
-(defface jmdict-kana
-  '((t . (:weight bold)))
-  "Face for JMDict kana readings."
+  "Face for JMDict sub-headers."
   :group 'jmdict)
 
 ;; Utility macros
@@ -124,15 +137,17 @@ The return value is a list of alists, where each alist contains
 the properties named by the columns and sub-tables are
 represented as lists with the property name the same as the
 sub-table name."
-  (let* ((rows-raw (esqlite-read db (jmdict--make-query spec where)))
-         ;; Esqlite uses :null instead of nil for null values, so we
-         ;; have to convert them all
-         (rows (mapcar (lambda (row)
-                         (mapcar (lambda (column)
-                                   (if (eql :null column) nil column))
-                                 row))
-                       rows-raw)))
-    (jmdict--parse-rows rows spec)))
+  (if (file-readable-p db)
+      (let* ((rows-raw (esqlite-read db (jmdict--make-query spec where)))
+             ;; Esqlite uses :null instead of nil for null values, so we
+             ;; have to convert them all
+             (rows (mapcar (lambda (row)
+                             (mapcar (lambda (column)
+                                       (if (eql :null column) nil column))
+                                     row))
+                           rows-raw)))
+        (jmdict--parse-rows rows spec))
+    (error "Database not readable: %s" db)))
 
 (defun jmdict--parse-rows (rows spec)
   "Parse structured data from ROWS according to SPEC.
@@ -413,13 +428,13 @@ make it easier to identify headers."
     (insert "\n")
     (dolist (kanji kanji-readings)
       (insert (propertize (cdr (assoc "reading" kanji))
-                          'face 'jmdict-kanji))
+                          'face 'jmdict-sub-header))
       (when-let ((info (jmdict--values '("KanjiInfo" "info") kanji)))
         (insert " (" (string-join info ", ") ")"))
       (insert "\n"))
     (dolist (kana kana-readings)
       (insert (propertize (cdr (assoc "reading" kana))
-                          'face 'jmdict-kana))
+                          'face 'bold))
       (when-let ((info (jmdict--values '("ReadingInfo" "info") kana)))
         (insert " (" (string-join info ", ") ")"))
       (when-let ((restrictions
@@ -477,15 +492,15 @@ make it easier to identify headers."
       (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
     (insert "\n")))
 
-(defmacro jmdict--with-jmdict-buffer (buffer &rest body)
+(defmacro jmdict--with-jmdict-buffer (name buffer &rest body)
   "Evaluate BODY with the JMDict buffer as the current buffer.
-BUFFER will be bound to the buffer in BODY. The JMDict buffer
-will be placed in `jmdict-mode' and read-only mode will be
-inhibited for BODY."
+BUFFER will be bound to the buffer in BODY and will have the name
+NAME. The JMDict buffer will be created in `jmdict-mode' and
+read-only mode will be inhibited for BODY."
   (declare (indent 1))
-  `(let ((,buffer (get-buffer jmdict--buffer-name)))
+  `(let ((,buffer (get-buffer ,name)))
      (unless ,buffer
-       (setf ,buffer (get-buffer-create jmdict--buffer-name))
+       (setf ,buffer (get-buffer-create ,name))
        (with-current-buffer ,buffer
          (jmdict-mode)))
      (with-current-buffer ,buffer
@@ -613,7 +628,7 @@ of the window."
 (defun jmdict (query)
   "Query JMDict for QUERY and display the results."
   (interactive "sQuery: ")
-  (jmdict--with-jmdict-buffer buffer
+  (jmdict--with-jmdict-buffer jmdict--buffer-name buffer
     (when jmdict--current-query
       (push (cons jmdict--current-query (point))
             jmdict--history-back-stack))
