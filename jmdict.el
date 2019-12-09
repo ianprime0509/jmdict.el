@@ -170,11 +170,11 @@ top-level table and SUB-SPECS are the sub-tables to process."
         (consumed (1+ (length columns))))
     ;; Populate the initial parsed alist with the column values
     ;; of the first row
-    (cl-mapcar (lambda (column value)
-                 (setf parsed (cl-acons column value parsed)))
-               ;; We use rest below to ignore the initial (implicit)
-               ;; ID column
-               columns (cl-rest (first rows)))
+    (cl-loop for column in columns
+             ;; We use rest below to ignore the initial (implicit) ID
+             ;; column
+             for value in (cl-rest (first rows))
+             do (push (cons column value) parsed))
     ;; Populate additional plist entries for sub-tables
     (dolist (sub-spec sub-specs)
       (let* ((rows (mapcar (lambda (row)
@@ -182,7 +182,7 @@ top-level table and SUB-SPECS are the sub-tables to process."
                            rows))
              (sub-value (jmdict--parse-rows rows sub-spec)))
         (cl-incf consumed (jmdict--n-columns sub-spec))
-        (setf parsed (cl-acons (first sub-spec) sub-value parsed))))
+        (push (cons (first sub-spec) sub-value) parsed)))
     parsed))
 
 (defun jmdict--n-columns (spec)
@@ -311,6 +311,23 @@ PARENT is the name of the parent table, or nil if there is none."
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
          (= "Gloss.language" "'eng'"))))
 
+(jmdict--defun-cached jmdict--get-kanji (character)
+  "Find the Kanjidic entry for CHARACTER."
+  (first
+   (jmdict--query
+    jmdict-kanjidic-path
+    '("Character" nil ("literal" "grade" "stroke_count" "frequency" "jlpt_level")
+      ("Radical" "character_id" (:optional "radical" "type"))
+      ("Variant" "character_id" (:optional "variant" "type"))
+      ("DictionaryReference" "character_id" (:optional "reference" "type" "volume" "page"))
+      ("ReadingMeaningGroup" "character_id" ()
+       ("Reading" "reading_meaning_group_id" ("reading" "type" "on_type" "approved"))
+       ("Meaning" "reading_meaning_group_id" ("meaning")))
+      ("Nanori" "character_id" (:optional "nanori")))
+    `(and (= "Character.literal" ,(esqlite-format-text character))
+          (in "Reading.type" "('ja_kun', 'ja_on')")
+          (= "Meaning.language" "'en'")))))
+
 (jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
@@ -387,6 +404,8 @@ return a list of all values found."
 ;; JMDict buffer display
 
 (defvar jmdict--buffer-name "*Jmdict*")
+
+(defvar jmdict--kanji-buffer-name "*Jmdict kanji*")
 
 (define-button-type 'jmdict-reference
   'help-echo "mouse-2, RET: Follow reference"
@@ -492,12 +511,42 @@ make it easier to identify headers."
       (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
     (insert "\n")))
 
+(defun jmdict--insert-kanji (kanji)
+  "Insert KANJI into the current buffer."
+  (jmdict--insert-entry-header (cdr (assoc "literal" kanji)))
+  (insert "\n")
+  (let ((stroke-count (cdr (assoc "stroke_count" kanji))))
+    (insert (propertize
+             (format "%s stroke%s\n"
+                     stroke-count
+                     (if (equal "1" stroke-count) "" "s"))
+             'face 'bold)))
+  (insert "\n")
+  (dolist (reading-meaning-group (jmdict--values "ReadingMeaningGroup" kanji))
+    (dolist (reading (jmdict--values "Reading" reading-meaning-group))
+      (insert (format "%s (%s)\n"
+                      (propertize (cdr (assoc "reading" reading))
+                                  'face 'jmdict-sub-header)
+                      (cdr (assoc "type" reading)))))
+    (dolist (meaning
+             (jmdict--values '("Meaning" "meaning") reading-meaning-group))
+      (insert " - " meaning "\n"))
+    (insert "\n"))
+  (when-let ((references (jmdict--values "DictionaryReference" kanji)))
+    (insert (propertize "Dictionary references:" 'face 'bold) "\n")
+    (dolist (reference references)
+      (insert (format "%s: %s\n"
+                      (propertize (cdr (assoc "type" reference))
+                                  'face 'bold)
+                      (cdr (assoc "reference" reference))))))
+  (insert "\n"))
+
 (defmacro jmdict--with-jmdict-buffer (name buffer &rest body)
   "Evaluate BODY with the JMDict buffer as the current buffer.
 BUFFER will be bound to the buffer in BODY and will have the name
 NAME. The JMDict buffer will be created in `jmdict-mode' and
 read-only mode will be inhibited for BODY."
-  (declare (indent 1))
+  (declare (indent 2))
   `(let ((,buffer (get-buffer ,name)))
      (unless ,buffer
        (setf ,buffer (get-buffer-create ,name))
@@ -521,9 +570,10 @@ read-only mode will be inhibited for BODY."
 
 (defvar-local jmdict--history-back-stack ()
   "The stack of previous history entries.
-Each element on the stack is of the form (QUERY . POSITION),
-where QUERY is the query associated with the buffer and POSITION
-is the position of point.")
+Each element on the stack is of the form (TYPE QUERY POSITION),
+where TYPE is either `entry' or `kanji', QUERY is the query
+associated with the buffer and POSITION is the position of
+point.")
 
 (defvar-local jmdict--history-forward-stack ()
   "The stack of next history entries.
@@ -531,21 +581,9 @@ Each element on the stack is of the same form as
 `jmdict--history-back-stack'.")
 
 (defvar-local jmdict--current-query nil
-  "The query associated with the current buffer.")
-
-(defun jmdict--display-query-result (query)
-  "Find and display all entries matching QUERY.
-Clear the current buffer, insert the formatted entries matching
-QUERY and navigate to the beginning of the buffer. Update the
-history stacks as appropriate."
-  (let ((inhibit-read-only t))
-    (let* ((ids (jmdict--search-entries query))
-           (entries (jmdict--get-entries ids)))
-      (erase-buffer)
-      (dolist (entry entries)
-        (jmdict--insert-entry entry)
-        (insert "\n"))
-      (goto-char (point-min)))))
+  "The query associated with the current buffer.
+This is a cons cell where the car is the type, either `entry' or
+`kanji', and the cdr is the query string.")
 
 (defun jmdict--move-beginning-of-header ()
   "Move to the beginning of the header under point.
@@ -562,17 +600,48 @@ If point is not on a header, do nothing."
     (when-let ((end (next-single-property-change (point) 'jmdict-header)))
       (goto-char end))))
 
+(defun jmdict--go (history-entry &optional preserve-history)
+  "Display HISTORY-ENTRY in the current buffer.
+HISTORY-ENTRY is a list of the form used in
+`jmdict--history-back-stack' and `jmdict--history-forward-stack'.
+If PRESERVE-HISTORY is non-nil, do not update the history.
+Otherwise, clear all forward history and add the current query to
+the back history. Regardless of the value of PRESERVE-HISTORY,
+set `jmdict--current-query'."
+  (unless preserve-history
+    (when jmdict--current-query
+      (push (list (car jmdict--current-query)
+                  (cdr jmdict--current-query)
+                  (point))
+            jmdict--history-back-stack))
+    (setf jmdict--history-forward-stack ()))
+  (cl-destructuring-bind (type query point) history-entry
+    (setf jmdict--current-query (cons type query))
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (cl-case type
+        (entry
+         (let* ((ids (jmdict--search-entries query))
+                (entries (jmdict--get-entries ids)))
+           (dolist (entry entries)
+             (jmdict--insert-entry entry)
+             (insert "\n"))))
+        (kanji
+         (let ((kanji (jmdict--get-kanji query)))
+           (jmdict--insert-kanji kanji)))))
+    (goto-char (or point (point-min)))))
+
 (defun jmdict-go-back ()
   "Go back to the results of the previous query."
   (interactive)
   (if-let ((back (pop jmdict--history-back-stack)))
       (progn
         (when jmdict--current-query
-          (push (cons jmdict--current-query (point))
+          (push (list (car jmdict--current-query)
+                      (cdr jmdict--current-query)
+                      (point))
                 jmdict--history-forward-stack))
-        (setf jmdict--current-query (car back))
-        (jmdict--display-query-result (car back))
-        (goto-char (cdr back))
+        (jmdict--go back t)
         (recenter))
     (message "No previous query")))
 
@@ -583,11 +652,11 @@ This undoes the action of `jmdict-go-back'."
   (if-let ((forward (pop jmdict--history-forward-stack)))
       (progn
         (when jmdict--current-query
-          (push (cons jmdict--current-query (point))
+          (push (list (car jmdict--current-query)
+                      (cdr jmdict--current-query)
+                      (point))
                 jmdict--history-back-stack))
-        (setf jmdict--current-query (car forward))
-        (jmdict--display-query-result (car forward))
-        (goto-char (cdr forward))
+        (jmdict--go forward t)
         (recenter))
     (message "No next query")))
 
@@ -629,12 +698,14 @@ of the window."
   "Query JMDict for QUERY and display the results."
   (interactive "sQuery: ")
   (jmdict--with-jmdict-buffer jmdict--buffer-name buffer
-    (when jmdict--current-query
-      (push (cons jmdict--current-query (point))
-            jmdict--history-back-stack))
-    (setf jmdict--history-forward-stack ())
-    (setf jmdict--current-query query)
-    (jmdict--display-query-result query)
+    (jmdict--go (list 'entry query nil))
+    (display-buffer buffer)))
+
+(defun jmdict-kanji (query)
+  "Query Kanjidic for QUERY and display the results."
+  (interactive "sKanji: ")
+  (jmdict--with-jmdict-buffer jmdict--kanji-buffer-name buffer
+    (jmdict--go (list 'kanji query nil))
     (display-buffer buffer)))
 
 (define-derived-mode jmdict-mode special-mode "JMDict"

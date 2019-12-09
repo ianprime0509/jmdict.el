@@ -243,7 +243,7 @@ Note: only one top-level element is supported (or needed).")
        ("reading_meaning_group_id" "INTEGER NOT NULL REFERENCES ReadingMeaningGroup(id)" :parent-id
                                    :indexed t)
        ("reading" "TEXT NOT NULL COLLATE NOCASE" (:text) :indexed t)
-       ("type" "TEXT NOT NULL" (:|r_type|))
+       ("type" "TEXT NOT NULL" (:|r_type|) :indexed t)
        ("on_type" "TEXT" (:|on_type|))
        ("approved" "TEXT" (:|r_status|))))
      (:|meaning|
@@ -253,7 +253,8 @@ Note: only one top-level element is supported (or needed).")
        ("meaning" "TEXT NOT NULL COLLATE NOCASE" (:text)
                   :indexed t)
        ("language" "TEXT NOT NULL" (:or (:|m_lang|) "en")
-                   :comment "The two-letter language code of the meaning"))))
+                   :comment "The two-letter language code of the meaning"
+                   :indexed t))))
     ((:|reading_meaning| :|nanori|)
      ("Nanori"
       ("character_id" "INTEGER NOT NULL REFERENCES Character(id)" :parent-id
