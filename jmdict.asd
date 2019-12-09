@@ -13,13 +13,16 @@
 
 ;;;; Code:
 
-(defsystem :jmdict
+(defsystem "jmdict"
   :description "A utility to convert JMDict and related project files to an SQLite database."
   :version "0.1.0"
   :author "Ian Johnson <ianprime0509@gmail.com>"
   :licence "MIT"
   :depends-on ("cl-ppcre" "s-xml" "sqlite" "uiop")
-  :components ((:file "packages")
-               (:file "jmdict" :depends-on ("packages"))))
+  :components ((:file "jmdict")))
+
+(defsystem "jmdict/tests"
+  :depends-on ("jmdict" "fiveam" "sqlite" "uiop")
+  :components ((:file "jmdict-test")))
 
 ;;;; jmdict.asd ends here

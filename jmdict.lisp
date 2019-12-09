@@ -16,6 +16,17 @@
 
 ;;;; Code:
 
+(in-package :cl-user)
+
+(defpackage :jmdict
+  (:documentation "Jmdict is a simple utility for converting JMDict and other Japanese reference files to a unified SQLite database.")
+  (:use :cl)
+  (:export
+   *jmdict-structure*
+   *kanjidic-structure*
+   convert-xml-to-sqlite
+   convert-tatoeba-to-sqlite))
+
 (in-package :jmdict)
 
 ;; This is an unfortunate workaround for the fact that s-xml uses
@@ -332,7 +343,7 @@ STRUCTURE is a database structure in the format of
            when (= (rem n 10000) 0)
            do (format *error-output* "Processed ~d entries~%" n))))))
 
-;; Macros
+;;; Macros and helper functions
 
 (defmacro gethash-lazy (key table default)
   "Return the value of KEY in the hash table TABLE with a (lazily computed) default value DEFAULT."
@@ -345,20 +356,18 @@ STRUCTURE is a database structure in the format of
              (setf (gethash ,key ,table) ,value)
              (values ,value t))))))
 
-(defmacro loop-substructures (var path structure &body body)
-  "Loop over all sub-structures of STRUCTURE by following PATH.
-Bind each sub-structure to VAR and execute BODY for each
-sub-structure. As a special case, PATH may be a single symbol.
+(defun loop-substructures (path value function)
+  "Execute FUNCTION with all sub-structures of VALUE by following PATH.
+As a special case, PATH may be a single symbol.
 
-For example, using this macro with the path (:codepoint :cp_value)
-will iterate over all the cp_value elements in all the codepoint
-elements in STRUCTURE."
+For example, using this function with the path (:codepoint :cp_value)
+will call FUNCTION with the contents of each cp_value element in all
+the codepoint elements in VALUE."
   (ctypecase path
-    (symbol `(loop for ,var in (cdr (assoc ,path ,structure))
-                do ,@body))
-    (list (let ((loop-var (gensym)))
-            `(loop for ,loop-var in (cdr (assoc ,(first path) ,structure))
-                do (loop-substructures ,var ,(rest path) ,loop-var ,body))))))
+    (null (funcall function value))
+    (symbol (loop-substructures (list path) value function))
+    (list (loop for sub-value in (cdr (assoc (first path) value))
+               do (loop-substructures (rest path) sub-value function)))))
 
 ;;; SQLite interaction
 
@@ -471,10 +480,11 @@ enclosing XML element), if there is such a parent."
           (format *error-output* "Warning: skipping record: ~a~%" e)))
       ;; Process sub-structures
       (loop for (path . substructure) in (rest structure)
-         do (loop-substructures child-value path value
-                 (insert-value db child-value substructure
-                               id-counters prepared-statements
-                               :parent-id id))))))
+         do (loop-substructures path value
+                 (lambda (child-value)
+                   (insert-value db child-value substructure
+                                 id-counters prepared-statements
+                                 :parent-id id)))))))
 
 (defun column-value (column value parent-id)
   "Return the value of COLUMN evaluated in the context of VALUE.
@@ -586,11 +596,13 @@ ENTITIES is a hashtable giving the expansions of XML entities."
   nil)
 
 (defun parse-xml-entities (input)
-  "Parse a stream of XML from INPUT and return a hashtable with all entities found in the DOCTYPE (as well as all standard XML entities)."
+  "Parse a stream of XML from INPUT and return a hashtable with all entities found in the DOCTYPE (as well as all standard XML entities).
+Return NIL if there was no (valid) doctype anywhere in the file."
   ;; Skip input until we reach the DOCTYPE
-  (loop with scanner = (ppcre:create-scanner "<!DOCTYPE")
+  (loop with doctype-scanner = (ppcre:create-scanner "<!DOCTYPE")
      for line = (read-line input nil)
-     until (ppcre:scan scanner line))
+     unless line return nil
+     until (ppcre:scan doctype-scanner line))
   ;; Try to read all the entities we can until we reach ]>
   ;; Unfortunately, make-standard-entities is not exported in s-xml
   (loop with entities = (s-xml::make-standard-entities)
@@ -598,6 +610,7 @@ ENTITIES is a hashtable giving the expansions of XML entities."
                            "<!ENTITY +([^ ]+) +\"([^\"]+)\">")
      and end-scanner = (ppcre:create-scanner "]>")
      for line = (read-line input nil)
+     unless line return nil
      do (ppcre:register-groups-bind (entity expansion) (entity-scanner line)
           (setf (gethash entity entities) expansion))
      when (ppcre:scan end-scanner line)
