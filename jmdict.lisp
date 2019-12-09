@@ -563,18 +563,25 @@ ENTITIES is a hashtable giving the expansions of XML entities."
              (let ((assoc (assoc key alist)))
                (if assoc
                    (prog1 alist
-                     (setf (cdr assoc) (nconc (cdr assoc) (list value))))
+                     (push value (cdr assoc)))
                    (cons (list key value) alist))))
            (convert-attributes (attributes)
              (mapcar (lambda (attr)
+                       ;; Convert the cons cell representation to a
+                       ;; list for consistency, even though there's
+                       ;; only one value for each attribute
                        (cons (car attr) (list (cdr attr))))
                      attributes))
            (new-element-hook (name attributes seed)
              (declare (ignore name attributes seed))
              ())
+           (reverse-assoc-pair (pair)
+             (cons (car pair) (nreverse (cdr pair))))
            (finish-element-hook (name attributes parent-seed seed)
-             (let ((structure (append (convert-attributes attributes)
-                                      seed)))
+             (let ((structure (nconc (convert-attributes attributes)
+                                     ;; All the value lists in the
+                                     ;; seed are in reverse order
+                                     (mapcar #'reverse-assoc-pair seed))))
                (if (eql name element)
                    ;; If we're at the target element, all we need to
                    ;; do is call our handler
