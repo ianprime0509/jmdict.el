@@ -599,21 +599,20 @@ make it easier to identify headers."
                       (cdr (assoc "reference" reference))))))
   (insert "\n"))
 
-(defmacro jmdict--with-jmdict-buffer (name buffer &rest body)
+(defmacro jmdict--with-jmdict-buffer (name &rest body)
   "Evaluate BODY with the JMDict buffer as the current buffer.
-BUFFER will be bound to the buffer in BODY and will have the name
-NAME. The JMDict buffer will be created in `jmdict-mode' and
-read-only mode will be inhibited for BODY."
+The JMDict buffer will have the name NAME and be created in
+`jmdict-mode'."
   (declare (indent 2))
-  `(let ((,buffer (get-buffer ,name)))
-     (unless ,buffer
-       (setf ,buffer (get-buffer-create ,name))
+  (let ((buffer (gensym)))
+    `(let ((,buffer (get-buffer ,name)))
+       (unless ,buffer
+         (setf ,buffer (get-buffer-create ,name))
+         (with-current-buffer ,buffer
+           (jmdict-mode)))
        (with-current-buffer ,buffer
-         (jmdict-mode)))
-     (with-current-buffer ,buffer
-       (let ((inhibit-read-only t))
-         ,@body)
-       (set-buffer-modified-p nil))))
+         ,@body
+         (set-buffer-modified-p nil)))))
 
 ;; Interactive commands
 
@@ -757,16 +756,16 @@ of the window."
 (defun jmdict (query)
   "Query JMDict for QUERY and display the results."
   (interactive "sQuery: ")
-  (jmdict--with-jmdict-buffer jmdict--buffer-name buffer
+  (jmdict--with-jmdict-buffer jmdict--buffer-name
     (jmdict--go (list 'entry query nil))
-    (display-buffer buffer)))
+    (display-buffer (current-buffer))))
 
 (defun jmdict-kanji (query)
   "Query Kanjidic for QUERY and display the results."
   (interactive "sKanji: ")
-  (jmdict--with-jmdict-buffer jmdict--kanji-buffer-name buffer
+  (jmdict--with-jmdict-buffer jmdict--kanji-buffer-name
     (jmdict--go (list 'kanji query nil))
-    (display-buffer buffer)))
+    (display-buffer (current-buffer))))
 
 (define-derived-mode jmdict-mode special-mode "JMDict"
   "Major mode for JMDict definitions."
