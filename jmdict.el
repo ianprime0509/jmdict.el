@@ -42,6 +42,11 @@
 PATH is expanded using `expand-file-name'."
   (set-default symbol (expand-file-name path)))
 
+(defun jmdict--clear-caches-and-set (symbol value)
+  "Clear all caches and set the default value of SYMBOL to VALUE."
+  (jmdict--clear-caches)
+  (set-default symbol value))
+
 (defcustom jmdict-jmdict-path
   (expand-file-name "~/jmdict/jmdict.sqlite3")
   "Path to the JMDict SQLite database."
@@ -63,6 +68,12 @@ PATH is expanded using `expand-file-name'."
   :type 'file
   :set #'jmdict--set-default-path)
 
+(defcustom jmdict-result-limit 100
+  "Maximum number of results to fetch for a query."
+  :group 'jmdict
+  :type 'integer
+  :set #'jmdict--clear-caches-and-set)
+
 (defface jmdict-header
   '((t . (:height 2.0 :weight bold)))
   "Face for JMDict entry headers."
@@ -73,7 +84,10 @@ PATH is expanded using `expand-file-name'."
   "Face for JMDict sub-headers."
   :group 'jmdict)
 
-;; Utility macros
+;; Caching support
+
+(defvar jmdict--caches ()
+  "A list of caches currently defined.")
 
 (defmacro jmdict--defun-cached (name arglist
                                      &optional docstring decl
@@ -99,6 +113,7 @@ avoid a call to the underlying function."
         (cached (gensym)))
     `(progn
        (defvar ,cache-var (make-ring 20) ,cache-doc)
+       (push ',cache-var jmdict--caches)
        (defun ,name ,arglist
          ,docstring
          ,decl
@@ -111,14 +126,27 @@ avoid a call to the underlying function."
                           (cons (list ,@arguments) ,cached))
              ,cached))))))
 
+(defun jmdict--clear-caches ()
+  "Clear all caches."
+  (dolist (cache-var jmdict--caches)
+    (let ((size (ring-size (symbol-value cache-var))))
+      (set cache-var (make-ring size)))))
+
 ;; SQLite integration
 
-(defun jmdict--query (db spec where)
+(defun jmdict--query (db spec where &optional limit order-by)
   "Query DB and return the resulting data as a structure.
 
 WHERE is a filter expression provided in a simple s-expression
 format (the only conversion is to add parentheses and put the
 operator between the two operands if there are two operands).
+
+LIMIT, if non-nil, is the maximum number of results to return.
+
+ORDER-BY is a list of columns on which to order, described using
+the same s-expression syntax as WHERE. If nil, order the columns
+according to the primary keys of the tables in SPEC (in the order
+they appear).
 
 SPEC is a query specification, which takes the format (TABLE
 PARENT-ID COLUMNS &rest SUB-STRUCTURES).
@@ -138,7 +166,8 @@ the properties named by the columns and sub-tables are
 represented as lists with the property name the same as the
 sub-table name."
   (if (file-readable-p db)
-      (let* ((rows-raw (esqlite-read db (jmdict--make-query spec where)))
+      (let* ((rows-raw
+              (esqlite-read db (jmdict--make-query spec where limit order-by)))
              ;; Esqlite uses :null instead of nil for null values, so we
              ;; have to convert them all
              (rows (mapcar (lambda (row)
@@ -157,7 +186,11 @@ The return value is in the same format as `jmdict--query'."
     (declare (ignore table parent-id))
     ;; Ignore keyword options in columns
     (setf columns (cl-remove-if #'keywordp columns))
-    (let ((grouped-rows (jmdict--group-by-id rows)))
+    (let ((grouped-rows
+           (jmdict--group-by #'cl-first
+                             (cl-remove-if (lambda (row)
+                                             (null (cl-first row)))
+                                           rows))))
       (mapcar (lambda (group)
                 (jmdict--structure-rows (cdr group) columns sub-specs))
               grouped-rows))))
@@ -173,7 +206,7 @@ top-level table and SUB-SPECS are the sub-tables to process."
     (cl-loop for column in columns
              ;; We use rest below to ignore the initial (implicit) ID
              ;; column
-             for value in (cl-rest (first rows))
+             for value in (cl-rest (cl-first rows))
              do (push (cons column value) parsed))
     ;; Populate additional plist entries for sub-tables
     (dolist (sub-spec sub-specs)
@@ -182,7 +215,7 @@ top-level table and SUB-SPECS are the sub-tables to process."
                            rows))
              (sub-value (jmdict--parse-rows rows sub-spec)))
         (cl-incf consumed (jmdict--n-columns sub-spec))
-        (push (cons (first sub-spec) sub-value) parsed)))
+        (push (cons (cl-first sub-spec) sub-value) parsed)))
     parsed))
 
 (defun jmdict--n-columns (spec)
@@ -194,48 +227,38 @@ ID columns that are added implicitly."
     (declare (ignore tables))
     (length columns)))
 
-(defun jmdict--group-by-id (rows)
-  "Group ROWS by the first column in each row.
-The order of the rows is preserved, and the return value is an
-alist."
-  (let (groups)
-    (dolist (row rows)
-      ;; Exclude rows where the ID is null
-      (when (first row)
-        (if-let ((assoc (assoc (first row) groups)))
-            (push row (cdr assoc))
-          (push (cons (first row) (list row)) groups))))
-    ;; Make sure each group is in order
-    (dolist (group groups)
-      (setf (cdr group) (nreverse (cdr group))))
-    (nreverse groups)))
-
-(defun jmdict--make-query (spec where)
-  "Return the SQL query corresponding to SPEC and WHERE.
-SPEC and WHERE are as described in `jmdict--query'."
+(defun jmdict--make-query (spec where &optional limit order-by)
+  "Return the SQL query corresponding to the given arguments.
+SPEC, WHERE, LIMIT and ORDER-BY are as described in
+`jmdict--query'."
   (cl-multiple-value-bind (tables columns)
       (jmdict--parse-query-spec spec nil)
-    (let ((columns (mapcar (lambda (column)
-                             (format "%s.%s"
-                                     (first column)
-                                     (second column)))
-                           columns))
-          (first-table (first (first tables)))
-          (rest-tables
-           (cl-loop for (table join-on optional) in (cl-rest tables)
-                    collect (format "%s %s ON %s"
-                                    (if optional "LEFT JOIN" "JOIN")
-                                    table
-                                    join-on)))
-          (id-columns (mapcar (lambda (table)
-                                (format "%s.id" (first table)))
-                              tables)))
-      (format "SELECT %s\nFROM %s\n%s\nWHERE %s\nORDER BY %s;"
+    (let* ((columns (mapcar (lambda (column)
+                              (format "%s.%s"
+                                      (cl-first column)
+                                      (second column)))
+                            columns))
+           (first-table (cl-first (cl-first tables)))
+           (rest-tables
+            (cl-loop for (table join-on optional) in (cl-rest tables)
+                     collect (format "%s %s ON %s"
+                                     (if optional "LEFT JOIN" "JOIN")
+                                     table
+                                     join-on)))
+           (id-columns (mapcar (lambda (table)
+                                 (format "%s.id" (cl-first table)))
+                               tables))
+           (order-columns
+            (if order-by
+                (mapcar #'jmdict--convert-sql-expression order-by)
+              id-columns)))
+      (format "SELECT %s\nFROM %s\n%s\nWHERE %s\nORDER BY %s%s;"
               (string-join columns ", ")
               first-table
               (string-join rest-tables "\n")
               (jmdict--convert-sql-expression where)
-              (string-join id-columns ", ")))))
+              (string-join order-columns ", ")
+              (if limit (format "\nLIMIT %d" limit) "")))))
 
 (defun jmdict--convert-sql-expression (expr)
   "Convert EXPR to a SQL expression.
@@ -249,9 +272,9 @@ multiple applications of a binary operator from left to right."
         (0 (error "No operands provided"))
         (1 (format "(%s %s)"
                    op
-                   (jmdict--convert-sql-expression (first operands))))
+                   (jmdict--convert-sql-expression (cl-first operands))))
         (2 (format "(%s %s %s)"
-                   (jmdict--convert-sql-expression (first operands))
+                   (jmdict--convert-sql-expression (cl-first operands))
                    op
                    (jmdict--convert-sql-expression (second operands))))
         (t (cl-destructuring-bind (op first second &rest rest) expr
@@ -272,7 +295,7 @@ PARENT is the name of the parent table, or nil if there is none."
            (list (list table
                        (when parent
                          (format "%s.%s = %s.id" table parent-id parent))
-                       (eql :optional (first columns)))))
+                       (eql :optional (cl-first columns)))))
           (columns
            (nconc (list (list table "id"))
                   (mapcar (lambda (column) (list table column))
@@ -309,11 +332,12 @@ PARENT is the name of the parent table, or nil if there is none."
       ("Gloss" "sense_id" ("gloss" "type"))
       ("SenseInfo" "sense_id" (:optional "info"))))
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
-         (= "Gloss.language" "'eng'"))))
+         (= "Gloss.language" "'eng'"))
+   jmdict-result-limit))
 
 (jmdict--defun-cached jmdict--get-kanji (character)
   "Find the Kanjidic entry for CHARACTER."
-  (first
+  (cl-first
    (jmdict--query
     jmdict-kanjidic-path
     '("Character" nil ("literal" "grade" "stroke_count" "frequency" "jlpt_level")
@@ -326,7 +350,8 @@ PARENT is the name of the parent table, or nil if there is none."
       ("Nanori" "character_id" (:optional "nanori")))
     `(and (= "Character.literal" ,(esqlite-format-text character))
           (in "Reading.type" "('ja_kun', 'ja_on')")
-          (= "Meaning.language" "'en'")))))
+          (= "Meaning.language" "'en'"))
+    jmdict-result-limit)))
 
 (jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
@@ -339,14 +364,16 @@ The return value is a list of entry IDs."
              jmdict-jmdict-path
              '("Entry" nil ("id")
                ("Kanji" "entry_id" ()))
-             `(= "Kanji.reading" ,query-string))))
+             `(= "Kanji.reading" ,query-string)
+             jmdict-result-limit)))
          (kana-results
           (when is-japanese
             (jmdict--query
              jmdict-jmdict-path
              '("Entry" nil ("id")
                ("Reading" "entry_id" ()))
-             `(= "Reading.reading" ,query-string))))
+             `(= "Reading.reading" ,query-string)
+             jmdict-result-limit)))
          (gloss-results
           (unless is-japanese
             (jmdict--query
@@ -355,7 +382,8 @@ The return value is a list of entry IDs."
                ("Sense" "entry_id" ()
                 ("Gloss" "sense_id" ())))
              `(and (like "Gloss.gloss" ,query-string)
-                   (= "Gloss.language" "'eng'")))))
+                   (= "Gloss.language" "'eng'"))
+             jmdict-result-limit)))
          (all-results
           (append kanji-results kana-results gloss-results)))
     (seq-uniq (mapcar (lambda (entry)
@@ -363,6 +391,11 @@ The return value is a list of entry IDs."
                       all-results))))
 
 ;; Utility functions
+
+(defconst jmdict--kanji-reading-types
+  '(("ja_on" . "on")
+    ("ja_kun" . "kun"))
+  "Alist of Kanjidic reading types and descriptions.")
 
 (defun jmdict--is-japanese (query)
   "Return non-nil if QUERY is Japanese text."
@@ -374,8 +407,23 @@ The return value is a list of entry IDs."
   "Return the primary reading for ENTRY.
 The primary reading is the first kanji if any kanji are available
 or the first kana reading."
-  (or (cdr (assoc "reading" (first (cdr (assoc "Kanji" entry)))))
-      (cdr (assoc "reading" (first (cdr (assoc "Reading" entry)))))))
+  (or (cdr (assoc "reading" (cl-first (cdr (assoc "Kanji" entry)))))
+      (cdr (assoc "reading" (cl-first (cdr (assoc "Reading" entry)))))))
+
+(defun jmdict--group-by (function list)
+  "Group LIST by the values extracted by FUNCTION.
+Return an alist where the keys are the values extracted by
+FUNCTION and the values are lists of the corresponding elements
+of LIST."
+  (let (groups)
+    (dolist (element list)
+      (let ((key (funcall function element)))
+        (if-let ((group (assoc key groups)))
+            (push element (cdr group))
+          (push (cons key (list element)) groups))))
+    (nreverse (mapcar (lambda (group) (cons (car group)
+                                            (nreverse (cdr group))))
+                      groups))))
 
 (defun jmdict--values (path alist &optional multiple)
   "Extract a list of the values at PATH in ALIST.
@@ -390,7 +438,7 @@ return a list of all values found."
       (if (cl-endp path)
           alist
         (jmdict--values (cl-rest path)
-                        (jmdict--values (first path) alist multiple)
+                        (jmdict--values (cl-first path) alist multiple)
                         t))
     (if multiple
         (apply #'append
@@ -419,7 +467,7 @@ return a list of all values found."
   "Follow the reference linked by BUTTON."
   ;; TODO: not all references are just a single word; some reference
   ;; only part of a definition
-  (jmdict (first (split-string (button-label button)
+  (jmdict (cl-first (split-string (button-label button)
                                jmdict--reference-separator))))
 
 (defun jmdict--insert-entry-header (header)
@@ -497,14 +545,14 @@ make it easier to identify headers."
                 (jmdict--values '("SenseAntonym" "target") sense)))
       (insert "Antonyms: ")
       (cl-loop for ant on antonyms
-               do (insert-button (first ant) 'type 'jmdict-reference)
+               do (insert-button (cl-first ant) 'type 'jmdict-reference)
                unless (cl-endp (cl-rest ant)) do (insert ", "))
       (insert "\n"))
     (when-let ((cross-references
                 (jmdict--values '("SenseCrossReference" "target") sense)))
       (insert "See also: ")
       (cl-loop for ref on cross-references
-               do (insert-button (first ref) 'type 'jmdict-reference)
+               do (insert-button (cl-first ref) 'type 'jmdict-reference)
                unless (cl-endp (cl-rest ref)) do (insert ", "))
       (insert "\n"))
     (dolist (gloss (jmdict--values "Gloss" sense))
@@ -523,11 +571,21 @@ make it easier to identify headers."
              'face 'bold)))
   (insert "\n")
   (dolist (reading-meaning-group (jmdict--values "ReadingMeaningGroup" kanji))
-    (dolist (reading (jmdict--values "Reading" reading-meaning-group))
-      (insert (format "%s (%s)\n"
-                      (propertize (cdr (assoc "reading" reading))
-                                  'face 'jmdict-sub-header)
-                      (cdr (assoc "type" reading)))))
+    (let* ((readings (jmdict--values "Reading" reading-meaning-group))
+           (grouped-readings (jmdict--group-by (lambda (reading)
+                                                 (cdr (assoc "type" reading)))
+                                               readings))
+           (sorted-readings (cl-sort grouped-readings #'string<
+                                     :key #'car)))
+      (dolist (group sorted-readings)
+        (let ((readings (mapcar (lambda (reading)
+                                  (cdr (assoc "reading" reading)))
+                                (cdr group))))
+          (insert (format "%s (%s)\n"
+                          (propertize (string-join readings ", ")
+                                      'face 'jmdict-sub-header)
+                          (cdr (assoc (car group)
+                                      jmdict--kanji-reading-types)))))))
     (dolist (meaning
              (jmdict--values '("Meaning" "meaning") reading-meaning-group))
       (insert " - " meaning "\n"))
@@ -600,6 +658,12 @@ If point is not on a header, do nothing."
     (when-let ((end (next-single-property-change (point) 'jmdict-header)))
       (goto-char end))))
 
+(defun jmdict--current-history-entry ()
+  "Return a history entry representing the current state."
+  (list (car jmdict--current-query)
+        (cdr jmdict--current-query)
+        (point)))
+
 (defun jmdict--go (history-entry &optional preserve-history)
   "Display HISTORY-ENTRY in the current buffer.
 HISTORY-ENTRY is a list of the form used in
@@ -608,57 +672,53 @@ If PRESERVE-HISTORY is non-nil, do not update the history.
 Otherwise, clear all forward history and add the current query to
 the back history. Regardless of the value of PRESERVE-HISTORY,
 set `jmdict--current-query'."
-  (unless preserve-history
-    (when jmdict--current-query
-      (push (list (car jmdict--current-query)
-                  (cdr jmdict--current-query)
-                  (point))
-            jmdict--history-back-stack))
-    (setf jmdict--history-forward-stack ()))
-  (cl-destructuring-bind (type query point) history-entry
-    (setf jmdict--current-query (cons type query))
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (cl-case type
-        (entry
-         (let* ((ids (jmdict--search-entries query))
-                (entries (jmdict--get-entries ids)))
-           (dolist (entry entries)
-             (jmdict--insert-entry entry)
-             (insert "\n"))))
-        (kanji
-         (let ((kanji (jmdict--get-kanji query)))
-           (jmdict--insert-kanji kanji)))))
-    (goto-char (or point (point-min)))))
+  (let ((current-entry (jmdict--current-history-entry)))
+    (cl-destructuring-bind (type query point) history-entry
+      (let ((inhibit-read-only t))
+       (erase-buffer)
+       (cl-case type
+         (entry
+          (if-let* ((ids (jmdict--search-entries query))
+                    (entries (jmdict--get-entries ids)))
+            (dolist (entry entries)
+              (jmdict--insert-entry entry)
+              (insert "\n"))
+            (error "No entry for %s" query)))
+         (kanji
+          (if-let* ((kanji (jmdict--get-kanji query)))
+              (jmdict--insert-kanji kanji)
+            (error "No kanji for %s" query)))))
+      (goto-char (or point (point-min)))
+      ;; Update the current query and history
+      (setf jmdict--current-query (cons type query))
+      (unless preserve-history
+        (push current-entry jmdict--history-back-stack)
+        (setf jmdict--history-forward-stack ())))))
 
 (defun jmdict-go-back ()
   "Go back to the results of the previous query."
   (interactive)
-  (if-let ((back (pop jmdict--history-back-stack)))
-      (progn
-        (when jmdict--current-query
-          (push (list (car jmdict--current-query)
-                      (cdr jmdict--current-query)
-                      (point))
-                jmdict--history-forward-stack))
+  (if-let ((back (cl-first jmdict--history-back-stack)))
+      (let ((current-entry (jmdict--current-history-entry)))
         (jmdict--go back t)
-        (recenter))
-    (message "No previous query")))
+        (recenter)
+        ;; Only update the history after navigation was successful
+        (pop jmdict--history-back-stack)
+        (push current-entry jmdict--history-forward-stack))
+    (error "No previous query")))
 
 (defun jmdict-go-forward ()
   "Go forward to the results of the next query.
 This undoes the action of `jmdict-go-back'."
   (interactive)
-  (if-let ((forward (pop jmdict--history-forward-stack)))
-      (progn
-        (when jmdict--current-query
-          (push (list (car jmdict--current-query)
-                      (cdr jmdict--current-query)
-                      (point))
-                jmdict--history-back-stack))
+  (if-let ((forward (cl-first jmdict--history-forward-stack)))
+      (let ((current-entry (jmdict--current-history-entry)))
         (jmdict--go forward t)
-        (recenter))
-    (message "No next query")))
+        (recenter)
+        ;; Only update the history after navigation was successful
+        (pop jmdict--history-forward-stack)
+        (push current-entry jmdict--history-back-stack))
+    (error "No next query")))
 
 (defun jmdict-next-entry (arg)
   "Navigate ARG entries forward.
