@@ -42,11 +42,6 @@
 PATH is expanded using `expand-file-name'."
   (set-default symbol (expand-file-name path)))
 
-(defun jmdict--clear-caches-and-set (symbol value)
-  "Clear all caches and set the default value of SYMBOL to VALUE."
-  (jmdict--clear-caches)
-  (set-default symbol value))
-
 (defcustom jmdict-jmdict-path
   (expand-file-name "~/jmdict/jmdict.sqlite3")
   "Path to the JMDict SQLite database."
@@ -71,8 +66,7 @@ PATH is expanded using `expand-file-name'."
 (defcustom jmdict-result-limit 100
   "Maximum number of results to fetch for a query."
   :group 'jmdict
-  :type 'integer
-  :set #'jmdict--clear-caches-and-set)
+  :type 'integer)
 
 (defface jmdict-header
   '((t . (:height 2.0 :weight bold)))
@@ -399,9 +393,15 @@ The return value is a list of entry IDs."
 
 (defun jmdict--is-japanese (query)
   "Return non-nil if QUERY is Japanese text."
-  (cl-loop for char across query
-           thereis (seq-contains '(kana han cjk-misc)
-                                 (aref char-script-table char))))
+  (cl-etypecase query
+    (character (seq-contains '(kana han cjk-misc)
+                             (aref char-script-table query)))
+    (string (cl-loop for char across query
+                     thereis (jmdict--is-japanese char)))))
+
+(defun jmdict--is-kanji (char)
+  "Return non-nil is CHAR is a kanji."
+  (eql 'han (aref char-script-table char)))
 
 (defun jmdict--primary-reading (entry)
   "Return the primary reading for ENTRY.
@@ -586,6 +586,7 @@ make it easier to identify headers."
                                       'face 'jmdict-sub-header)
                           (cdr (assoc (car group)
                                       jmdict--kanji-reading-types)))))))
+    (insert "\n")
     (dolist (meaning
              (jmdict--values '("Meaning" "meaning") reading-meaning-group))
       (insert " - " meaning "\n"))
@@ -603,7 +604,7 @@ make it easier to identify headers."
   "Evaluate BODY with the JMDict buffer as the current buffer.
 The JMDict buffer will have the name NAME and be created in
 `jmdict-mode'."
-  (declare (indent 2))
+  (declare (indent 1))
   (let ((buffer (gensym)))
     `(let ((,buffer (get-buffer ,name)))
        (unless ,buffer
@@ -619,6 +620,7 @@ The JMDict buffer will have the name NAME and be created in
 (defvar jmdict-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'jmdict)
+    (define-key map (kbd "k") #'jmdict-kanji)
     (define-key map (kbd "l") #'jmdict-go-back)
     (define-key map (kbd "r") #'jmdict-go-forward)
     (define-key map (kbd "n") #'jmdict-next-entry)
@@ -762,10 +764,16 @@ of the window."
 
 (defun jmdict-kanji (query)
   "Query Kanjidic for QUERY and display the results."
-  (interactive "sKanji: ")
-  (jmdict--with-jmdict-buffer jmdict--kanji-buffer-name
-    (jmdict--go (list 'kanji query nil))
-    (display-buffer (current-buffer))))
+  (interactive
+   (let ((current-char (char-after)))
+     (if (jmdict--is-kanji current-char)
+         (list (string current-char))
+       (list (read-string "Kanji: ")))))
+  (let ((display-action (when (eql 'jmdict-mode major-mode)
+                          (list #'display-buffer-below-selected))))
+    (jmdict--with-jmdict-buffer jmdict--kanji-buffer-name
+      (jmdict--go (list 'kanji query nil))
+      (display-buffer (current-buffer) display-action))))
 
 (define-derived-mode jmdict-mode special-mode "JMDict"
   "Major mode for JMDict definitions."
