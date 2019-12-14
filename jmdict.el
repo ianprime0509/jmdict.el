@@ -63,7 +63,7 @@ PATH is expanded using `expand-file-name'."
   :type 'file
   :set #'jmdict--set-default-path)
 
-(defcustom jmdict-result-limit 100
+(defcustom jmdict-result-limit 25
   "Maximum number of results to fetch for a query."
   :group 'jmdict
   :type 'integer)
@@ -326,8 +326,7 @@ PARENT is the name of the parent table, or nil if there is none."
       ("Gloss" "sense_id" ("gloss" "type"))
       ("SenseInfo" "sense_id" (:optional "info"))))
    `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
-         (= "Gloss.language" "'eng'"))
-   jmdict-result-limit))
+         (= "Gloss.language" "'eng'"))))
 
 (jmdict--defun-cached jmdict--get-kanji (character)
   "Find the Kanjidic entry for CHARACTER."
@@ -344,8 +343,7 @@ PARENT is the name of the parent table, or nil if there is none."
       ("Nanori" "character_id" (:optional "nanori")))
     `(and (= "Character.literal" ,(esqlite-format-text character))
           (in "Reading.type" "('ja_kun', 'ja_on')")
-          (= "Meaning.language" "'en'"))
-    jmdict-result-limit)))
+          (= "Meaning.language" "'en'")))))
 
 (jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
@@ -379,7 +377,9 @@ The return value is a list of entry IDs."
                    (= "Gloss.language" "'eng'"))
              jmdict-result-limit)))
          (all-results
-          (append kanji-results kana-results gloss-results)))
+          (loop repeat jmdict-result-limit
+                for result in (nconc kanji-results kana-results gloss-results)
+                collect result)))
     (seq-uniq (mapcar (lambda (entry)
                         (cdr (assoc "id" entry)))
                       all-results))))
