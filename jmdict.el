@@ -29,8 +29,10 @@
 ;; Configuration
 
 (require 'cl-lib)
-(require 'esqlite)
 (require 'subr-x)
+(require 'thingatpt)
+
+(require 'esqlite)
 
 (defgroup jmdict nil
   "An interface to the JMDict Japanese dictionary"
@@ -780,18 +782,33 @@ of the window."
 
 (defun jmdict (query)
   "Query JMDict for QUERY and display the results."
-  (interactive "sQuery: ")
+  (interactive
+   (let* ((current-word (thing-at-point 'word t))
+          (default (unless (or (null current-word)
+                               (string-blank-p current-word))
+                     current-word))
+          (prompt (if default
+                      (format "Query (default %s): " default)
+                    "Query: ")))
+     (list (read-string prompt nil nil default))))
   (jmdict--with-jmdict-buffer jmdict--buffer-name
     (jmdict--go (list 'entry query nil))
     (display-buffer (current-buffer))))
 
 (defun jmdict-kanji (query)
-  "Query Kanjidic for QUERY and display the results."
+  "Query Kanjidic for QUERY and display the results.
+If no prefix argument is provided and a kanji is after point,
+query for that kanji without prompting."
   (interactive
-   (let ((current-char (char-after)))
-     (if (jmdict--is-kanji current-char)
-         (list (string current-char))
-       (list (read-string "Kanji: ")))))
+   (let* ((current-char (char-after))
+          (default (when (jmdict--is-kanji current-char)
+                     (string current-char)))
+          (prompt (if default
+                      (format "Kanji (default %s): " default)
+                    "Kanji: ")))
+     (if (and default (not current-prefix-arg))
+         (list default)
+       (list (read-string prompt nil nil default)))))
   (let ((display-action (when (eql 'jmdict-mode major-mode)
                           (list #'display-buffer-below-selected))))
     (jmdict--with-jmdict-buffer jmdict--kanji-buffer-name
