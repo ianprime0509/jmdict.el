@@ -284,7 +284,8 @@ STRUCTURE is a database structure in the format of
 *JMDICT-STRUCTURE*."
   (sqlite:with-open-database (db sqlite-path)
     (create-tables db structure)
-    (insert-values db xml-path structure)))
+    (insert-values db xml-path structure)
+    (sqlite:execute-non-query db "ANALYZE")))
 
 (defun convert-tatoeba-to-sqlite (examples-path sqlite-path)
   "Convert the Tatoeba/Tanaka Corpus examples file to a SQLite database."
@@ -342,7 +343,8 @@ STRUCTURE is a database structure in the format of
                                    word reading sense sentence-form
                                    (if checked 1 0))))))
            when (= (rem n 10000) 0)
-           do (format *error-output* "Processed ~d entries~%" n))))))
+           do (format *error-output* "Processed ~d entries~%" n))))
+    (sqlite:execute-non-query db "ANALYZE")))
 
 ;;; Macros and helper functions
 

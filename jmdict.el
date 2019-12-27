@@ -160,8 +160,8 @@ the properties named by the columns and sub-tables are
 represented as lists with the property name the same as the
 sub-table name."
   (if (file-readable-p db)
-      (let* ((rows-raw
-              (esqlite-read db (jmdict--make-query spec where limit order-by)))
+      (let* ((query (jmdict--make-query spec where limit order-by))
+             (rows-raw (esqlite-read db query))
              ;; Esqlite uses :null instead of nil for null values, so we
              ;; have to convert them all
              (rows (mapcar (lambda (row)
