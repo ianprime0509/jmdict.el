@@ -140,7 +140,8 @@ LIMIT, if non-nil, is the maximum number of results to return.
 ORDER-BY is a list of columns on which to order, described using
 the same s-expression syntax as WHERE. If nil, order the columns
 according to the primary keys of the tables in SPEC (in the order
-they appear).
+they appear). The special value `:ids' will be substituted with
+the ID columns of the tables in SPEC.
 
 SPEC is a query specification, which takes the format (TABLE
 PARENT-ID COLUMNS &rest SUB-STRUCTURES).
@@ -244,7 +245,11 @@ SPEC, WHERE, LIMIT and ORDER-BY are as described in
                                tables))
            (order-columns
             (if order-by
-                (mapcar #'jmdict--convert-sql-expression order-by)
+                (mapcan (lambda (expr)
+                          (if (eql :ids expr)
+                              id-columns
+                            (list (jmdict--convert-sql-expression expr))))
+                        order-by)
               id-columns)))
       (format "SELECT %s\nFROM %s\n%s\nWHERE %s\nORDER BY %s%s;"
               (string-join columns ", ")
@@ -348,26 +353,31 @@ PARENT is the name of the parent table, or nil if there is none."
 (jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
-  (let* ((is-japanese (jmdict--is-japanese query))
+  (let* ((is-japanese (jmdict--contains-japanese query))
          (query-string (esqlite-format-text query))
-         (kanji-results
-          (when is-japanese
+         (results
+          (cond
+           ((jmdict--contains-kanji query)
+            ;; If the query contains a kanji, it can only be one of
+            ;; the kanji readings
             (jmdict--query
              jmdict-jmdict-path
              '("Entry" nil ("id")
                ("Kanji" "entry_id" ()))
              `(= "Kanji.reading" ,query-string)
-             jmdict-result-limit)))
-         (kana-results
-          (when is-japanese
+             jmdict-result-limit))
+           ((jmdict--is-kana-only query)
+            ;; Readings can only contain kana
             (jmdict--query
              jmdict-jmdict-path
              '("Entry" nil ("id")
                ("Reading" "entry_id" ()))
              `(= "Reading.reading" ,query-string)
-             jmdict-result-limit)))
-         (gloss-results
-          (unless is-japanese
+             jmdict-result-limit))
+           (t
+            ;; Otherwise, we can assume that we're looking for a gloss
+            ;; (actually, this doesn't cover the case that someone
+            ;; might be searching for a special Japanese character)
             (jmdict--query
              jmdict-jmdict-path
              '("Entry" nil ("id")
@@ -375,14 +385,10 @@ The return value is a list of entry IDs."
                 ("Gloss" "sense_id" ())))
              `(and (like "Gloss.gloss" ,query-string)
                    (= "Gloss.language" "'eng'"))
-             jmdict-result-limit)))
-         (all-results
-          (loop repeat jmdict-result-limit
-                for result in (nconc kanji-results kana-results gloss-results)
-                collect result)))
+             jmdict-result-limit)))))
     (seq-uniq (mapcar (lambda (entry)
                         (cdr (assoc "id" entry)))
-                      all-results))))
+                      results))))
 
 ;; Utility functions
 
@@ -391,17 +397,32 @@ The return value is a list of entry IDs."
     ("ja_kun" . "kun"))
   "Alist of Kanjidic reading types and descriptions.")
 
-(defun jmdict--is-japanese (query)
-  "Return non-nil if QUERY is Japanese text."
-  (cl-etypecase query
-    (character (seq-contains '(kana han cjk-misc)
-                             (aref char-script-table query)))
-    (string (cl-loop for char across query
-                     thereis (jmdict--is-japanese char)))))
+(defun jmdict--is-japanese (char)
+  "Return non-nil if CHAR is a Japanese character."
+  (seq-contains '(kana han cjk-misc) (aref char-script-table char)))
+
+(defun jmdict--contains-japanese (query)
+  "Return non-nil if QUERY contains a Japanese character."
+  (cl-loop for char across query
+           thereis (jmdict--is-japanese char)))
+
+(defun jmdict--is-kana (char)
+  "Return non-nil if CHAR is a kana."
+  (eql 'kana (aref char-script-table char)))
+
+(defun jmdict--is-kana-only (query)
+  "Return non-nil if QUERY contains only kana."
+  (cl-loop for char across query
+           always (jmdict--is-kana char)))
 
 (defun jmdict--is-kanji (char)
-  "Return non-nil is CHAR is a kanji."
+  "Return non-nil if CHAR is a kanji."
   (eql 'han (aref char-script-table char)))
+
+(defun jmdict--contains-kanji (query)
+  "Return non-nil if QUERY contains a kanji."
+  (cl-loop for char across query
+           thereis (jmdict--is-kanji char)))
 
 (defun jmdict--primary-reading (entry)
   "Return the primary reading for ENTRY.
@@ -660,10 +681,12 @@ If point is not on a header, do nothing."
       (goto-char end))))
 
 (defun jmdict--current-history-entry ()
-  "Return a history entry representing the current state."
-  (list (car jmdict--current-query)
-        (cdr jmdict--current-query)
-        (point)))
+  "Return a history entry representing the current state.
+If there is no current query, return nil."
+  (when jmdict--current-query
+    (list (car jmdict--current-query)
+          (cdr jmdict--current-query)
+          (point))))
 
 (defun jmdict--go (history-entry &optional preserve-history)
   "Display HISTORY-ENTRY in the current buffer.
@@ -692,7 +715,7 @@ set `jmdict--current-query'."
       (goto-char (or point (point-min)))
       ;; Update the current query and history
       (setf jmdict--current-query (cons type query))
-      (unless preserve-history
+      (unless (or (null current-entry) preserve-history)
         (push current-entry jmdict--history-back-stack)
         (setf jmdict--history-forward-stack ())))))
 
