@@ -357,24 +357,25 @@ PARENT is the name of the parent table, or nil if there is none."
 The return value is a list of entry IDs."
   (let* ((is-japanese (jmdict--contains-japanese query))
          (query-string (esqlite-format-text query))
+         (query-text (jmdict--strip-wildcards query))
          (results
           (cond
-           ((jmdict--contains-kanji query)
+           ((jmdict--contains-kanji query-text)
             ;; If the query contains a kanji, it can only be one of
             ;; the kanji readings
             (jmdict--query
              jmdict-jmdict-path
              '("Entry" nil ("id")
                ("Kanji" "entry_id" ()))
-             `(= "Kanji.reading" ,query-string)
+             `(like "Kanji.reading" ,query-string)
              jmdict-result-limit))
-           ((jmdict--is-kana-only query)
+           ((jmdict--is-kana-only query-text)
             ;; Readings can only contain kana
             (jmdict--query
              jmdict-jmdict-path
              '("Entry" nil ("id")
                ("Reading" "entry_id" ()))
-             `(= "Reading.reading" ,query-string)
+             `(like "Reading.reading" ,query-string)
              jmdict-result-limit))
            (t
             ;; Otherwise, we can assume that we're looking for a gloss
@@ -398,6 +399,12 @@ The return value is a list of entry IDs."
   '(("ja_on" . "on")
     ("ja_kun" . "kun"))
   "Alist of Kanjidic reading types and descriptions.")
+
+(defun jmdict--strip-wildcards (query)
+  "Return QUERY with all wildcard characters removed."
+  (cl-remove-if (lambda (char)
+                  (or (eql ?_ char) (eql ?% char)))
+                query))
 
 (defun jmdict--is-japanese (char)
   "Return non-nil if CHAR is a Japanese character."
