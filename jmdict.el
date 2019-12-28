@@ -668,9 +668,8 @@ make it easier to identify headers."
                do (insert-button (cl-first ref) 'type 'jmdict-reference)
                unless (cl-endp (cl-rest ref)) do (insert ", "))
       (insert "\n"))
-    (dolist (gloss (jmdict--values "Gloss" sense))
-      (insert " - " (cdr (assoc "gloss" gloss)) "\n"))
-    (insert "\n")))
+    (let ((glosses (jmdict--values '("Gloss" "gloss") sense)))
+      (insert " - " (string-join glosses ", ") "\n"))))
 
 (defun jmdict--insert-kanji (kanji)
   "Insert KANJI into the current buffer."
