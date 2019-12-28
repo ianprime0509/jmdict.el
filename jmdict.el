@@ -650,10 +650,10 @@ make it easier to identify headers."
                                   (cdr (assoc "word" s))
                                   (cdr (assoc "language" s))))
                         (jmdict--values "SenseSource" sense))))
-      (insert "Source language: " (string-join sources ", ")))
+      (insert "Source language: " (string-join sources ", ") "\n"))
     (when-let ((dialects
                 (jmdict--values '("SenseDialect" "dialect") sense)))
-      (insert "Dialects: " (string-join dialects ", ")))
+      (insert "Dialects: " (string-join dialects ", ") "\n"))
     (when-let ((antonyms
                 (jmdict--values '("SenseAntonym" "target") sense)))
       (insert "Antonyms: ")
