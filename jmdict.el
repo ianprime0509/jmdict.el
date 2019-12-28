@@ -155,6 +155,10 @@ parent (ignored at the top level). The first element of COLUMNS
 may be :optional to indicate that a left join should be used
 instead of an inner join, if applicable.
 
+Each column in COLUMNS (besides any keywords) may be a string,
+indicating a column to select from TABLE, or a list of the
+form (EXPRESSION ALIAS) to select a raw SQL expression.
+
 SUB-STRUCTURES is a list of structures in child tables to join
 with the parent.
 
@@ -230,11 +234,8 @@ SPEC, WHERE, LIMIT and ORDER-BY are as described in
 `jmdict--query'."
   (cl-multiple-value-bind (tables columns)
       (jmdict--parse-query-spec spec nil)
-    (let* ((columns (mapcar (lambda (column)
-                              (format "%s.%s"
-                                      (cl-first column)
-                                      (second column)))
-                            columns))
+    (let* ((columns (cl-loop for (expr alias) in columns
+                             collect (concat expr " AS " alias)))
            (first-table (cl-first (cl-first tables)))
            (rest-tables
             (cl-loop for (table join-on optional) in (cl-rest tables)
@@ -287,7 +288,7 @@ multiple applications of a binary operator from left to right."
   "Parse SPEC and return a list of tables and columns.
 The returned list is of the form (TABLES COLUMNS), where each
 element in TABLES is of the form (NAME JOIN-ON OPTIONAL) and each
-element in columns is of the form (TABLE COLUMN).
+element in columns is of the form (COLUMN-QUERY ALIAS).
 
 PARENT is the name of the parent table, or nil if there is none."
   (cl-destructuring-bind (table parent-id columns &rest sub-specs)
@@ -298,9 +299,14 @@ PARENT is the name of the parent table, or nil if there is none."
                          (format "%s.%s = %s.id" table parent-id parent))
                        (eql :optional (cl-first columns)))))
           (columns
-           (nconc (list (list table "id"))
-                  (mapcar (lambda (column) (list table column))
-                          (cl-remove-if #'keywordp columns)))))
+           (cl-loop for column in columns
+                    when (stringp column)
+                    collect (list (concat table "." column) column)
+                    when (listp column)
+                    collect (cl-destructuring-bind (expr alias) column
+                              (list (jmdict--convert-sql-expression expr)
+                                    alias)))))
+      (push (list (concat table ".id") "id") columns)
       (dolist (sub-spec sub-specs)
         (cl-multiple-value-bind (sub-tables sub-columns)
             (jmdict--parse-query-spec sub-spec table)
@@ -309,31 +315,45 @@ PARENT is the name of the parent table, or nil if there is none."
       (cl-values tables columns))))
 
 (jmdict--defun-cached jmdict--get-entries (ids)
-  "Find all JMdict entries with IDs in IDS."
-  (jmdict--query
-   jmdict-jmdict-path
-   '("Entry" nil ()
-     ("Kanji" "entry_id" (:optional "reading")
-      ("KanjiInfo" "kanji_id" (:optional "info"))
-      ("KanjiPriority" "kanji_id" (:optional "priority")))
-     ("Reading" "entry_id" ("reading")
-      ("ReadingRestriction" "reading_id" (:optional "restriction"))
-      ("ReadingInfo" "reading_id" (:optional "info"))
-      ("ReadingPriority" "reading_id" (:optional "priority")))
-     ("Sense" "entry_id" ()
-      ("SenseKanjiRestriction" "sense_id" (:optional "restriction"))
-      ("SenseKanaRestriction" "sense_id" (:optional "restriction"))
-      ("SenseCrossReference" "sense_id" (:optional "target"))
-      ("SenseAntonym" "sense_id" (:optional "target"))
-      ("SensePartOfSpeech" "sense_id" (:optional "part_of_speech"))
-      ("SenseField" "sense_id" (:optional "field"))
-      ("SenseMisc" "sense_id" (:optional "info"))
-      ("SenseSource" "sense_id" (:optional "word" "language"))
-      ("SenseDialect" "sense_id" (:optional "dialect"))
-      ("Gloss" "sense_id" ("gloss" "type"))
-      ("SenseInfo" "sense_id" (:optional "info"))))
-   `(and (in "Entry.id" ,(format "(%s)" (string-join ids ", ")))
-         (= "Gloss.language" "'eng'"))))
+  "Find all JMdict entries with IDs in IDS.
+IDS is a list of lists; all entries in a sub-list will be grouped
+together in the returned results."
+  (let ((group-expr
+         (format "CASE\n%s\nEND"
+                 (string-join
+                  (cl-loop for group-num from 0
+                           for id-group in ids
+                           collect (format "WHEN Entry.id IN (%s) THEN %d"
+                                           (string-join id-group ", ")
+                                           group-num))
+                  "\n")))
+        (all-ids (apply #'append ids)))
+    (jmdict--query
+     jmdict-jmdict-path
+     `("Entry" nil ((,group-expr "sort_group"))
+       ("Kanji" "entry_id" (:optional "reading")
+        ("KanjiInfo" "kanji_id" (:optional "info"))
+        ("KanjiPriority" "kanji_id" (:optional "priority")))
+       ("Reading" "entry_id" ("reading")
+        ("ReadingRestriction" "reading_id" (:optional "restriction"))
+        ("ReadingInfo" "reading_id" (:optional "info"))
+        ("ReadingPriority" "reading_id" (:optional "priority")))
+       ("Sense" "entry_id" ()
+        ("SenseKanjiRestriction" "sense_id" (:optional "restriction"))
+        ("SenseKanaRestriction" "sense_id" (:optional "restriction"))
+        ("SenseCrossReference" "sense_id" (:optional "target"))
+        ("SenseAntonym" "sense_id" (:optional "target"))
+        ("SensePartOfSpeech" "sense_id" (:optional "part_of_speech"))
+        ("SenseField" "sense_id" (:optional "field"))
+        ("SenseMisc" "sense_id" (:optional "info"))
+        ("SenseSource" "sense_id" (:optional "word" "language"))
+        ("SenseDialect" "sense_id" (:optional "dialect"))
+        ("Gloss" "sense_id" ("gloss" "type"))
+        ("SenseInfo" "sense_id" (:optional "info"))))
+     `(and (in "Entry.id" ,(format "(%s)" (string-join all-ids ", ")))
+           (= "Gloss.language" "'eng'"))
+     nil
+     '("sort_group" :ids))))
 
 (jmdict--defun-cached jmdict--get-kanji (character)
   "Find the Kanjidic entry for CHARACTER."
@@ -359,7 +379,7 @@ LIMIT is the maximum number of results to return."
                  '("Entry" nil ("id")
                    ("Kanji" "entry_id" ()))
                  `(like "Kanji.reading" ,(esqlite-format-text query))
-                 jmdict-result-limit))
+                 limit))
 
 (defun jmdict--search-entries-by-kana (query limit)
   "Search for JMDict entries where QUERY matches a kana reading.
@@ -368,7 +388,7 @@ LIMIT is the maximum number of results to return."
                  '("Entry" nil ("id")
                    ("Reading" "entry_id" ()))
                  `(like "Reading.reading" ,(esqlite-format-text query))
-                 jmdict-result-limit))
+                 limit))
 
 (defun jmdict--search-entries-by-gloss (query limit)
   "Search for JMDict entries where QUERY matches a gloss.
@@ -379,7 +399,7 @@ LIMIT is the maximum number of results to return."
                     ("Gloss" "sense_id" ())))
                  `(and (like "Gloss.gloss" ,(esqlite-format-text query))
                        (= "Gloss.language" "'eng'"))
-                 jmdict-result-limit))
+                 limit))
 
 (defun jmdict--try-queries (methods query-string limit)
   "Try queries from METHODS in order.
@@ -387,12 +407,21 @@ LIMIT is the maximum number of results to return. Each element of
 METHODS is a list of the form (PRECONDITION QUERY-FUNCTION),
 where the query will only be tried if PRECONDITION is non-nil and
 QUERY-FUNCTION will be called with QUERY-STRING and the remaining
-limit to return a list of results."
-  (cl-loop for (condition query-function) in methods
-           when (and condition (cl-plusp limit))
-           nconc (let ((matches (funcall query-function query-string limit)))
-                   (cl-decf limit (length matches))
-                   matches)))
+limit to return a list of results.
+
+Return two 'values' (really a list of two elements using
+`cl-values'): the results as a list of lists (each sub-list
+contains the results of a different query) and the total number
+of results."
+  (cl-loop with found = 0
+           for (condition query-function) in methods
+           when (and condition (< found limit))
+           collect (let ((matches (funcall query-function query-string
+                                           (- limit found))))
+                     (cl-incf found (length matches))
+                     matches)
+           into results
+           finally (return (cl-values results found))))
 
 (jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
@@ -411,28 +440,32 @@ The return value is a list of entry IDs."
           (list
            (list try-kanji #'jmdict--search-entries-by-kanji)
            (list try-kana #'jmdict--search-entries-by-kana)
-           (list try-gloss #'jmdict--search-entries-by-gloss)))
-         (results (jmdict--try-queries query-methods query jmdict-result-limit)))
-    ;; Try additional wildcards, if applicable
-    (when try-wildcards
-      (let ((results-remaining (- jmdict-result-limit (length results))))
-        ;; Try wildcard on the right ("starts with")
-        (when (cl-plusp results-remaining)
-          (let ((right-matches
-                 (jmdict--try-queries query-methods query-right-wild
-                                      results-remaining)))
-            (cl-decf results-remaining (length right-matches))
-            (setf results (nconc results right-matches))))
-        ;; Try wildcard on the left ("ends with")
-        (when (cl-plusp results-remaining)
-          (setf results
-                (nconc results
-                       (jmdict--try-queries query-methods query-left-wild
-                                            results-remaining))))))
-    (cl-remove-duplicates (mapcar (lambda (entry)
-                                    (cdr (assoc "id" entry)))
-                                  results)
-                          :test #'equal)))
+           (list try-gloss #'jmdict--search-entries-by-gloss))))
+    (cl-multiple-value-bind (results n-found)
+        (jmdict--try-queries query-methods query jmdict-result-limit)
+      ;; Try additional wildcards, if applicable
+      (when try-wildcards
+        (let ((results-remaining (- jmdict-result-limit n-found)))
+          ;; Try wildcard on the right ("starts with")
+          (when (cl-plusp results-remaining)
+            (cl-multiple-value-bind (right-matches n-matches)
+                (jmdict--try-queries query-methods query-right-wild
+                                     results-remaining)
+              (cl-decf results-remaining n-matches)
+              (setf results (nconc results right-matches))))
+          ;; Try wildcard on the left ("ends with")
+          (when (cl-plusp results-remaining)
+            (setf results
+                  (nconc results
+                         ;; If this were Common Lisp, we wouldn't need
+                         ;; any extra code here to just extract the
+                         ;; first return value :(
+                         (cl-first (jmdict--try-queries query-methods
+                                                        query-left-wild
+                                                        results-remaining)))))))
+      (mapcar (lambda (group)
+                (mapcar (lambda (entry) (cdr (assoc "id" entry))) group))
+              results))))
 
 ;; Utility functions
 
