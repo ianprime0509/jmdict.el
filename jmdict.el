@@ -65,7 +65,7 @@ PATH is expanded using `expand-file-name'."
   :type 'file
   :set #'jmdict--set-default-path)
 
-(defcustom jmdict-result-limit 25
+(defcustom jmdict-result-limit 15
   "Maximum number of results to fetch for a query."
   :group 'jmdict
   :type 'integer)
@@ -352,46 +352,87 @@ PARENT is the name of the parent table, or nil if there is none."
           (in "Reading.type" "('ja_kun', 'ja_on')")
           (= "Meaning.language" "'en'")))))
 
+(defun jmdict--search-entries-by-kanji (query limit)
+  "Search for JMDict entries where QUERY matches a kanji reading.
+LIMIT is the maximum number of results to return."
+  (jmdict--query jmdict-jmdict-path
+                 '("Entry" nil ("id")
+                   ("Kanji" "entry_id" ()))
+                 `(like "Kanji.reading" ,(esqlite-format-text query))
+                 jmdict-result-limit))
+
+(defun jmdict--search-entries-by-kana (query limit)
+  "Search for JMDict entries where QUERY matches a kana reading.
+LIMIT is the maximum number of results to return."
+  (jmdict--query jmdict-jmdict-path
+                 '("Entry" nil ("id")
+                   ("Reading" "entry_id" ()))
+                 `(like "Reading.reading" ,(esqlite-format-text query))
+                 jmdict-result-limit))
+
+(defun jmdict--search-entries-by-gloss (query limit)
+  "Search for JMDict entries where QUERY matches a gloss.
+LIMIT is the maximum number of results to return."
+  (jmdict--query jmdict-jmdict-path
+                 '("Entry" nil ("id")
+                   ("Sense" "entry_id" ()
+                    ("Gloss" "sense_id" ())))
+                 `(and (like "Gloss.gloss" ,(esqlite-format-text query))
+                       (= "Gloss.language" "'eng'"))
+                 jmdict-result-limit))
+
+(defun jmdict--try-queries (methods query-string limit)
+  "Try queries from METHODS in order.
+LIMIT is the maximum number of results to return. Each element of
+METHODS is a list of the form (PRECONDITION QUERY-FUNCTION),
+where the query will only be tried if PRECONDITION is non-nil and
+QUERY-FUNCTION will be called with QUERY-STRING and the remaining
+limit to return a list of results."
+  (cl-loop for (condition query-function) in methods
+           when (and condition (cl-plusp limit))
+           nconc (let ((matches (funcall query-function query-string limit)))
+                   (cl-decf limit (length matches))
+                   matches)))
+
 (jmdict--defun-cached jmdict--search-entries (query)
   "Search for JMDict entries matching QUERY.
 The return value is a list of entry IDs."
-  (let* ((is-japanese (jmdict--contains-japanese query))
-         (query-string (esqlite-format-text query))
-         (query-text (jmdict--strip-wildcards query))
-         (results
-          (cond
-           ((jmdict--contains-kanji query-text)
-            ;; If the query contains a kanji, it can only be one of
-            ;; the kanji readings
-            (jmdict--query
-             jmdict-jmdict-path
-             '("Entry" nil ("id")
-               ("Kanji" "entry_id" ()))
-             `(like "Kanji.reading" ,query-string)
-             jmdict-result-limit))
-           ((jmdict--is-kana-only query-text)
-            ;; Readings can only contain kana
-            (jmdict--query
-             jmdict-jmdict-path
-             '("Entry" nil ("id")
-               ("Reading" "entry_id" ()))
-             `(like "Reading.reading" ,query-string)
-             jmdict-result-limit))
-           (t
-            ;; Otherwise, we can assume that we're looking for a gloss
-            ;; (actually, this doesn't cover the case that someone
-            ;; might be searching for a special Japanese character)
-            (jmdict--query
-             jmdict-jmdict-path
-             '("Entry" nil ("id")
-               ("Sense" "entry_id" ()
-                ("Gloss" "sense_id" ())))
-             `(and (like "Gloss.gloss" ,query-string)
-                   (= "Gloss.language" "'eng'"))
-             jmdict-result-limit)))))
-    (seq-uniq (mapcar (lambda (entry)
-                        (cdr (assoc "id" entry)))
-                      results))))
+  (let* ((query-text (jmdict--strip-wildcards query))
+         (try-kanji (jmdict--contains-japanese query-text))
+         (try-kana (jmdict--is-kana-only query-text))
+         (try-gloss (not (jmdict--contains-japanese query-text)))
+         (try-wildcards (not (jmdict--contains-wildcard query)))
+         (query-right-wild (concat query "%"))
+         (query-left-wild (concat "%" query))
+         (query-methods
+          ;; A list of queries to try, in order, until we reach the
+          ;; maximum number of results. Each method is a list of the
+          ;; form (PRECONDITION QUERY-FUNCTION).
+          (list
+           (list try-kanji #'jmdict--search-entries-by-kanji)
+           (list try-kana #'jmdict--search-entries-by-kana)
+           (list try-gloss #'jmdict--search-entries-by-gloss)))
+         (results (jmdict--try-queries query-methods query jmdict-result-limit)))
+    ;; Try additional wildcards, if applicable
+    (when try-wildcards
+      (let ((results-remaining (- jmdict-result-limit (length results))))
+        ;; Try wildcard on the right ("starts with")
+        (when (cl-plusp results-remaining)
+          (let ((right-matches
+                 (jmdict--try-queries query-methods query-right-wild
+                                      results-remaining)))
+            (cl-decf results-remaining (length right-matches))
+            (setf results (nconc results right-matches))))
+        ;; Try wildcard on the left ("ends with")
+        (when (cl-plusp results-remaining)
+          (setf results
+                (nconc results
+                       (jmdict--try-queries query-methods query-left-wild
+                                            results-remaining))))))
+    (cl-remove-duplicates (mapcar (lambda (entry)
+                                    (cdr (assoc "id" entry)))
+                                  results)
+                          :test #'equal)))
 
 ;; Utility functions
 
@@ -399,6 +440,15 @@ The return value is a list of entry IDs."
   '(("ja_on" . "on")
     ("ja_kun" . "kun"))
   "Alist of Kanjidic reading types and descriptions.")
+
+(defun jmdict--is-wildcard (char)
+  "Return non-nil if CHAR is a wildcard."
+  (or (eql ?_ char) (eql ?% char)))
+
+(defun jmdict--contains-wildcard (query)
+  "Return non-nil if QUERY contains a wildcard."
+  (cl-loop for char across query
+           thereis (jmdict--is-wildcard char)))
 
 (defun jmdict--strip-wildcards (query)
   "Return QUERY with all wildcard characters removed."
