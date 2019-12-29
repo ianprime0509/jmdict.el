@@ -516,6 +516,19 @@ The return value is a list of entry IDs."
   (cl-loop for char across query
            thereis (jmdict--is-kanji char)))
 
+(defun jmdict--ordinal (number)
+  "Return the ordinal corresponding to NUMBER.
+For example, the ordinal for 1 is 1st."
+  (let ((suffix
+         (case (mod number 100)
+           ((11 12 13) "th")
+           (t (case (mod number 10)
+                (1 "st")
+                (2 "nd")
+                (3 "rd")
+                (t "th"))))))
+    (format "%d%s" number suffix)))
+
 (defun jmdict--primary-reading (entry)
   "Return the primary reading for ENTRY.
 The primary reading is the first kanji if any kanji are available
@@ -671,6 +684,52 @@ make it easier to identify headers."
     (let ((glosses (jmdict--values '("Gloss" "gloss") sense)))
       (insert " - " (string-join glosses ", ") "\n"))))
 
+(defconst jmdict-dictionary-names
+  #s(hash-table
+     test equal
+     data
+     ("nelson_c" "Modern Reader's Japanese-English Character Dictionary"
+      "nelson_n" "The New Nelson Japanese-English Character Dictionary"
+      "halpern_njecd" "New Japanese-English Character Dictionary"
+      "halpern_kkd" "Kodansha Kanji Dictionary"
+      "halpern_kkld" "Kanji Learners Dictionary"
+      "halpern_kkld_2ed" "Kanji Learners Dictionary, 2nd edition"
+      "heisig" "Remembering The  Kanji"
+      "heisig6" "Remembering The  Kanji, Sixth Ed."
+      "gakken" "A New Dictionary of Kanji Usage"
+      "oneill_names" "Japanese Names"
+      "oneill_kk" "Essential Kanji"
+      "moro" "Daikanwajiten"
+      "henshall" "A Guide To Remembering Japanese Characters"
+      "sh_kk" "Kanji and Kana"
+      "sh_kk2" "Kanji and Kana (2011 edition)"
+      "sakade" "A Guide To Reading and Writing Japanese"
+      "jf_cards" "Japanese Kanji Flashcards"
+      "henshall3" "A Guide To Reading and Writing Japanese, 3rd edition"
+      "tutt_cards" "Tuttle Kanji Cards"
+      "crowley" "The Kanji Way to Japanese Language Power"
+      "kanji_in_context" "Kanji in Context"
+      "busy_people" "Japanese for Busy People"
+      "kodansha_compact" "Kodansha Compact Kanji Guide"
+      "maniette" "Les Kanjis dans la tete"))
+  "A hash table giving human-readable dictionary names.
+This associates the names provided in Kanjidic with names that
+are more readable and familiar.")
+
+(defconst jmdict-grade-levels
+  #s(hash-table
+     test equal
+     data
+     ("1" "Taught in grade 1"
+      "2" "Taught in grade 2"
+      "3" "Taught in grade 3"
+      "4" "Taught in grade 4"
+      "5" "Taught in grade 5"
+      "6" "Taught in grade 6"
+      "8" "Taught in junior high"
+      "9" "Jinmeiyou kanji"))
+  "A hash table associating kanji grade levels to descriptions.")
+
 (defun jmdict--insert-kanji (kanji)
   "Insert KANJI into the current buffer."
   (jmdict--insert-entry-header (cdr (assoc "literal" kanji)))
@@ -681,6 +740,15 @@ make it easier to identify headers."
                      stroke-count
                      (if (equal "1" stroke-count) "" "s"))
              'face 'bold)))
+  (when-let ((freq (cdr (assoc "frequency" kanji))))
+    (insert (propertize (format "%s most common kanji in newspapers"
+                                (jmdict--ordinal (string-to-number freq)))
+                        'face 'italic)
+            "\n"))
+  (when-let ((grade (cdr (assoc "grade" kanji))))
+    (insert (propertize (format "%s" (gethash grade jmdict-grade-levels))
+                        'face 'italic)
+            "\n"))
   (insert "\n")
   (dolist (reading-meaning-group (jmdict--values "ReadingMeaningGroup" kanji))
     (let* ((readings (jmdict--values "Reading" reading-meaning-group))
@@ -699,17 +767,18 @@ make it easier to identify headers."
                           (cdr (assoc (car group)
                                       jmdict--kanji-reading-types)))))))
     (insert "\n")
-    (dolist (meaning
-             (jmdict--values '("Meaning" "meaning") reading-meaning-group))
-      (insert " - " meaning "\n"))
+    (let ((meanings (jmdict--values '("Meaning" "meaning")
+                                    reading-meaning-group)))
+      (insert " - " (string-join meanings ", ") "\n"))
     (insert "\n"))
   (when-let ((references (jmdict--values "DictionaryReference" kanji)))
     (insert (propertize "Dictionary references:" 'face 'bold) "\n")
     (dolist (reference references)
-      (insert (format "%s: %s\n"
-                      (propertize (cdr (assoc "type" reference))
-                                  'face 'bold)
-                      (cdr (assoc "reference" reference))))))
+      (let* ((type (cdr (assoc "type" reference)))
+             (readable-type (gethash type jmdict-dictionary-names type)))
+        (insert (format "%s: %s\n"
+                        (propertize readable-type 'face 'italic)
+                        (cdr (assoc "reference" reference)))))))
   (insert "\n"))
 
 (defmacro jmdict--with-jmdict-buffer (name &rest body)
