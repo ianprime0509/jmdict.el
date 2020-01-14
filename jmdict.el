@@ -875,6 +875,7 @@ set `jmdict--current-query'."
       (goto-char (or point (point-min)))
       ;; Update the current query and history
       (setf jmdict--current-query (cons type query))
+      (force-mode-line-update)
       (unless (or (null current-entry) preserve-history)
         (push current-entry jmdict--history-back-stack)
         (setf jmdict--history-forward-stack ())))))
@@ -975,7 +976,13 @@ query for that kanji without prompting."
 
 (define-derived-mode jmdict-mode special-mode "JMDict"
   "Major mode for JMDict definitions."
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (setf header-line-format '(""
+                             mode-line-front-space
+                             (jmdict--current-query
+                              (:eval (cdr jmdict--current-query))
+                              "No current query")
+                             mode-line-end-spaces)))
 
 (provide 'jmdict)
 ;;; jmdict.el ends here
